@@ -12,9 +12,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QEvent, QPointF, Qt
 from PySide6.QtGui import QColor, QImage, QMouseEvent
 from PySide6.QtWidgets import QApplication
+from PySide6.QtTest import QSignalSpy, QTest
 
 from videomanager.services.thumbnail_service import cache_signature
 from videomanager.ui.browser_view import BrowserView, VideoModel
+from videomanager.ui.related_popup import RelatedVideosPopup
 
 
 class HoverRenderTests(unittest.TestCase):
@@ -77,6 +79,41 @@ class HoverRenderTests(unittest.TestCase):
                 self.assertFalse(browser._cycle.isActive())
             finally:
                 browser.close()
+
+    def test_related_video_hover_uses_its_own_configurable_delay(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="vm-related-hover-") as directory:
+            model = VideoModel(Path(directory))
+            model.set_rows([{"id": "video-1", "display_title": "影片一", "file_size": 1,
+                             "mtime_ns": 1, "duration_ms": 1000, "missing_since": None,
+                             "thumbnail_state": "done", "thumbnail_signature": cache_signature(1, 1, 10)}])
+            browser = BrowserView(model, hover_delay_ms=2000, related_hover_delay_ms=35)
+            browser.resize(440, 280)
+            browser.show()
+            requested = QSignalSpy(browser.related_hover_requested)
+            ended = QSignalSpy(browser.related_hover_ended)
+            try:
+                self.app.processEvents()
+                rect = browser.visualRect(model.index(0))
+                QTest.mouseMove(browser.viewport(), rect.center())
+                QTest.qWait(80)
+                self.assertEqual(requested.count(), 1)
+                self.assertEqual(requested.at(0)[0], "video-1")
+                browser.stop_hover()
+                self.assertEqual(ended.count(), 1)
+            finally:
+                browser.close()
+
+    def test_related_popup_buttons_open_the_selected_video(self) -> None:
+        popup = RelatedVideosPopup()
+        activated = QSignalSpy(popup.video_activated)
+        popup.show_videos([{"id": "video-2", "display_title": "相似片", "shared_names": "人物甲"}])
+        try:
+            self.assertEqual(popup.content.count(), 1)
+            popup.content.itemAt(0).widget().click()
+            self.assertEqual(activated.count(), 1)
+            self.assertEqual(activated.at(0)[0], "video-2")
+        finally:
+            popup.close()
 
 
 if __name__ == "__main__":

@@ -16,7 +16,6 @@ from PySide6.QtWidgets import (
     QListView, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QProgressBar, QProgressDialog, QPushButton,
     QSplitter, QStackedWidget, QVBoxLayout, QWidget,
 )
-
 from videomanager.config import AppPaths, load_settings, save_settings
 from videomanager.compression.repository import interrupt_stale_jobs
 from videomanager.compression import repository as compression_jobs
@@ -50,6 +49,7 @@ from videomanager.ui.import_name_rules import ImportNameRulesDialog
 from videomanager.ui.metadata_dialog import MetadataDialog
 from videomanager.ui.notifications import NotificationDialog, NotificationHistory, Toast, notify_information
 from videomanager.ui.player_view import PlayerView
+from videomanager.ui.related_popup import RelatedVideosPopup
 from videomanager.ui.settings_dialog import SettingsDialog
 from videomanager.ui.stats_dialog import StatsDialog
 from videomanager.ui.trash_page import TrashPage
@@ -110,6 +110,7 @@ class MainWindow(QMainWindow):
         self._return_nav_key = "all"
         self._group_return_filters: tuple[str, dict] | None = None
         self.player: PlayerView | None = None
+        self._related_popup: RelatedVideosPopup | None = None
         self.compression_center: CompressionCenter | None = None
         self.edit_center: CompressionCenter | None = None
         self._player_return_widget: QWidget | None = None
@@ -415,7 +416,8 @@ class MainWindow(QMainWindow):
         empty_layout.addStretch()
         center_layout.addWidget(self.empty_state, 1)
         self.model = VideoModel(self.paths.cache, self.settings.preview_mode)
-        self.browser = BrowserView(self.model, self.settings.hover_delay_ms, self.settings.frame_interval_ms)
+        self.browser = BrowserView(self.model, self.settings.hover_delay_ms, self.settings.frame_interval_ms,
+                                   self.settings.related_hover_delay_ms)
         self.browser.set_thumbnail_width(self.settings.thumbnail_width)
         self.browser.selectionModel().selectionChanged.connect(lambda *_: self.show_selected_details())
         self.browser.selectionModel().selectionChanged.connect(lambda *_: self._update_recycle_button())
@@ -424,6 +426,8 @@ class MainWindow(QMainWindow):
         self.browser.group_open_requested.connect(self.open_group_folder)
         self.browser.files_dropped.connect(self._handle_dropped_paths)
         self.browser.context_menu_requested.connect(self.show_video_context_menu)
+        self.browser.related_hover_requested.connect(self.show_related_videos)
+        self.browser.related_hover_ended.connect(self.hide_related_videos)
         self.browser.blank_clicked.connect(self.show_selected_details)
         center_layout.addWidget(self.browser, 1)
         splitter.addWidget(center)
@@ -1846,6 +1850,34 @@ class MainWindow(QMainWindow):
         self.show_selected_details()
         self.refresh_videos()
 
+    def show_related_videos(self, video_id: str, anchor) -> None:
+        rows = repo.related_videos(self.connection, video_id)
+        if not rows:
+            self.hide_related_videos()
+            return
+        if self._related_popup is None:
+            self._related_popup = RelatedVideosPopup(self)
+            self._related_popup.video_activated.connect(self._open_related_video)
+        popup = self._related_popup
+        popup.hide_timer.stop()
+        popup.show_videos(rows)
+        screen = QApplication.screenAt(anchor) or self.screen()
+        area = screen.availableGeometry()
+        x = min(anchor.x(), area.right() - popup.width() + 1)
+        y = min(anchor.y() + 6, area.bottom() - popup.height() + 1)
+        popup.move(max(area.left(), x), max(area.top(), y))
+        popup.show()
+        popup.raise_()
+
+    def hide_related_videos(self) -> None:
+        if self._related_popup is not None:
+            self._related_popup.schedule_hide()
+
+    def _open_related_video(self, video_id: str) -> None:
+        if self._related_popup is not None:
+            self._related_popup.hide()
+        self.open_player(video_id)
+
     def show_filters(self) -> None:
         dialog = FilterDialog(self.connection, self.advanced_filters, self)
         if dialog.exec():
@@ -1904,6 +1936,7 @@ class MainWindow(QMainWindow):
         self.settings = updated
         self.model.set_preview_mode(updated.preview_mode)
         self.browser.set_timing(updated.hover_delay_ms, updated.frame_interval_ms)
+        self.browser.set_related_delay(updated.related_hover_delay_ms)
         self.browser.set_thumbnail_width(updated.thumbnail_width)
         if dialog.scan_existing_requested:
             self.scan_existing_video_names()

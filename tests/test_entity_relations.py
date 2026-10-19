@@ -4,17 +4,19 @@ import tempfile
 import unittest
 import os
 from pathlib import Path
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox, QTabWidget
 
-from videomanager.config import AppPaths
+from videomanager.config import AppPaths, Settings, load_settings, save_settings
 from videomanager.db import repository as repo
 from videomanager.db.database import open_database
 from videomanager.services.library_service import open_library
 from videomanager.services.scanner import scan_library
 from videomanager.services.sync_service import synchronize
 from videomanager.ui.details_panel import DetailsPanel
+from videomanager.ui.metadata_dialog import MetadataDialog
 
 
 class EntityRelationTests(unittest.TestCase):
@@ -52,6 +54,10 @@ class EntityRelationTests(unittest.TestCase):
                 self.assertEqual(repo.video_entity_ids(connection, ids[1], "person"), {person})
                 panel = DetailsPanel(connection)
                 panel.set_video(ids[0])
+                panel.people._buttons[person].click()
+                self.assertEqual(panel.people.selected_ids(), set())
+                panel.people._buttons[person].click()
+                self.assertEqual(panel.people.selected_ids(), {person})
                 panel.people.set_selected({person})
                 panel.studios.set_selected({studio})
                 self.assertTrue(panel.save_current())
@@ -66,6 +72,9 @@ class EntityRelationTests(unittest.TestCase):
                 self.assertEqual(repo.video_entity_ids(connection, ids[1]), {person, studio})
                 self.assertEqual({row["id"] for row in repo.list_videos(connection, marker.library_id,
                                  {"person_ids": [person], "studio_ids": [studio]})}, set(ids))
+                recommendations = repo.related_videos(connection, ids[0])
+                self.assertEqual([row["id"] for row in recommendations], [ids[1]])
+                self.assertIn("演員甲", recommendations[0]["shared_names"])
                 self.assertEqual([row["id"] for row in repo.list_videos(connection, marker.library_id,
                                  {"person_ids": [person], "studio_ids": [studio], "tag_all": [tag_a]})], [ids[0]])
                 panel.batch_operation.setCurrentIndex(1)
@@ -77,8 +86,29 @@ class EntityRelationTests(unittest.TestCase):
                 connection.close()
                 connection = open_database(paths.database, paths.backups)
                 self.assertEqual(repo.video_entity_ids(connection, ids[1]), {studio})
+                manager = MetadataDialog(connection)
+                self.assertEqual(manager.windowTitle(), "管理標籤／關聯")
+                self.assertEqual(manager.findChild(QTabWidget).count(), 2)
+                manager.entity_type.setCurrentIndex(1)
+                manager.refresh_entities(studio)
+                manager.entity_name.setText("片商乙")
+                manager.rename_entity()
+                self.assertEqual(connection.execute("SELECT name FROM entities WHERE id=?", (studio,)).fetchone()[0], "片商乙")
+                with patch.object(QMessageBox, "question", return_value=QMessageBox.Yes):
+                    manager.delete_entity()
+                self.assertIsNone(connection.execute("SELECT id FROM entities WHERE id=?", (studio,)).fetchone())
+                self.assertEqual(repo.video_entity_ids(connection, ids[1]), set())
+                manager.close()
             finally:
                 connection.close()
+
+    def test_related_hover_delay_is_saved_and_old_settings_keep_default(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="vm-related-settings-") as directory:
+            path = Path(directory) / "settings.json"
+            path.write_text('{"schema_version":1}', encoding="utf-8")
+            self.assertEqual(load_settings(path).related_hover_delay_ms, 2000)
+            save_settings(path, Settings(related_hover_delay_ms=3500))
+            self.assertEqual(load_settings(path).related_hover_delay_ms, 3500)
 
 
 if __name__ == "__main__":

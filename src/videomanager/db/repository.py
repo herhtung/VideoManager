@@ -430,6 +430,14 @@ def rename_entity(connection: sqlite3.Connection, entity_id: str, name: str) -> 
             raise ValueError("找不到此項目。")
 
 
+def delete_entity(connection: sqlite3.Connection, entity_id: str) -> int:
+    count = connection.execute("SELECT COUNT(*) FROM video_entities WHERE entity_id=?", (entity_id,)).fetchone()[0]
+    with connection:
+        if connection.execute("DELETE FROM entities WHERE id=?", (entity_id,)).rowcount != 1:
+            raise ValueError("找不到此項目。")
+    return count
+
+
 def video_entity_ids(connection: sqlite3.Connection, video_id: str, entity_type: str | None = None) -> set[str]:
     query = "SELECT ve.entity_id FROM video_entities ve JOIN entities e ON e.id=ve.entity_id WHERE ve.video_id=?"
     params: tuple = (video_id,)
@@ -437,6 +445,26 @@ def video_entity_ids(connection: sqlite3.Connection, video_id: str, entity_type:
         query += " AND e.type=?"
         params += (entity_type,)
     return {row[0] for row in connection.execute(query, params)}
+
+
+def related_videos(connection: sqlite3.Connection, video_id: str, limit: int = 6) -> list[sqlite3.Row]:
+    if not 1 <= limit <= 20:
+        raise ValueError("Invalid related video limit")
+    return connection.execute(
+        """SELECT v.id, v.display_title, COUNT(DISTINCT related.entity_id) AS shared_count,
+                  GROUP_CONCAT(DISTINCT e.name) AS shared_names
+           FROM video_entities source
+           JOIN video_entities related ON related.entity_id=source.entity_id AND related.video_id<>source.video_id
+           JOIN entities e ON e.id=related.entity_id
+           JOIN videos v ON v.id=related.video_id AND v.deleted_at IS NULL AND v.missing_since IS NULL
+           WHERE source.video_id=? AND NOT EXISTS (
+               SELECT 1 FROM video_group_members a
+               JOIN video_group_members b ON b.group_id=a.group_id
+               WHERE a.video_id=source.video_id AND b.video_id=v.id
+           )
+           GROUP BY v.id ORDER BY shared_count DESC, v.display_title COLLATE NOCASE LIMIT ?""",
+        (video_id, limit),
+    ).fetchall()
 
 
 def video_category_ids(connection: sqlite3.Connection, video_id: str) -> set[str]:

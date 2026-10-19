@@ -294,8 +294,11 @@ class BrowserView(QListView):
     files_dropped = Signal(object)
     context_menu_requested = Signal(object)
     blank_clicked = Signal()
+    related_hover_requested = Signal(str, object)
+    related_hover_ended = Signal()
 
-    def __init__(self, model: VideoModel, hover_delay_ms: int = 400, frame_interval_ms: int = 500, parent=None) -> None:
+    def __init__(self, model: VideoModel, hover_delay_ms: int = 400, frame_interval_ms: int = 500,
+                 related_hover_delay_ms: int = 2000, parent=None) -> None:
         super().__init__(parent)
         self.setModel(model)
         self._thumbnail_width = 180
@@ -321,6 +324,11 @@ class BrowserView(QListView):
         self._delay.setSingleShot(True)
         self._delay.setInterval(hover_delay_ms)
         self._delay.timeout.connect(self._start_hover)
+        self._related_delay = QTimer(self)
+        self._related_delay.setSingleShot(True)
+        self._related_delay.setInterval(related_hover_delay_ms)
+        self._related_delay.timeout.connect(self._show_related_hover)
+        self._related_visible = False
         self._cycle = QTimer(self)
         self._cycle.setInterval(frame_interval_ms)
         self._cycle.timeout.connect(self._next_frame)
@@ -475,6 +483,17 @@ class BrowserView(QListView):
         self.stop_hover()
         self._hover_candidate = index.row()
         self._delay.start()
+        self._related_delay.start()
+
+    def _show_related_hover(self) -> None:
+        if self._hover_candidate < 0 or self._hover_candidate >= len(self.model().rows):
+            return
+        row = self.model().rows[self._hover_candidate]
+        if row.get("_group_cover"):
+            return
+        rect = self.visualRect(self.model().index(self._hover_candidate))
+        self._related_visible = True
+        self.related_hover_requested.emit(row["id"], self.viewport().mapToGlobal(rect.bottomLeft()))
 
     def _start_hover(self) -> None:
         if self._hover_candidate < 0:
@@ -490,9 +509,16 @@ class BrowserView(QListView):
 
     def stop_hover(self) -> None:
         self._delay.stop()
+        self._related_delay.stop()
         self._cycle.stop()
         self._hover_candidate = -1
         self.model().show_frame(-1, 0)
+        if self._related_visible:
+            self._related_visible = False
+            self.related_hover_ended.emit()
+
+    def set_related_delay(self, milliseconds: int) -> None:
+        self._related_delay.setInterval(milliseconds)
 
     def leaveEvent(self, event) -> None:
         self.stop_hover()

@@ -8,8 +8,10 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QCheckBox, QColorDialog, QDialog, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
+    QCheckBox, QColorDialog, QComboBox, QDialog, QHBoxLayout, QLabel, QLineEdit,
+    QListWidget, QListWidgetItem, QMessageBox,
     QPushButton, QScrollArea, QVBoxLayout, QWidget, QGridLayout,
+    QTabWidget,
 )
 
 from videomanager.ui.notifications import notify_information
@@ -53,11 +55,11 @@ class MetadataDialog(QDialog):
         super().__init__(parent)
         self.connection = connection
         self._selected_tag_id: str | None = None
-        self.setWindowTitle("管理標籤與標籤分類")
+        self.setWindowTitle("管理標籤／關聯")
         self.resize(1260, 820)
         self.setMinimumSize(980, 660)
         outer = QVBoxLayout(self)
-        outer.addWidget(QLabel("左側可拖曳分類標題排序、拖曳標籤排序；把標籤拖到另一個分類標題可移動。右側分類清單也可拖曳。"))
+        tabs = QTabWidget()
         main = QHBoxLayout()
         self.tags = TagPicker(connection, multi_select=False, drag_tags=True, show_empty_groups=True)
         self.tags.tag_clicked.connect(self._tag_selected)
@@ -149,11 +151,106 @@ class MetadataDialog(QDialog):
         side_layout.addStretch()
         side_scroll.setWidget(side)
         main.addWidget(side_scroll, 2)
-        outer.addLayout(main, 1)
+        tag_page = QWidget()
+        tag_layout = QVBoxLayout(tag_page)
+        tag_layout.addWidget(QLabel("可拖曳分類與標籤排序；拖曳標籤至分類可移動。"))
+        tag_layout.addLayout(main, 1)
+        tabs.addTab(tag_page, "標籤")
+        tabs.addTab(self._entity_management_page(), "關聯")
+        tabs.setTabText(0, "標籤")
+        tabs.setTabText(1, "關聯")
+        outer.addWidget(tabs, 1)
         close = QPushButton("完成")
         close.clicked.connect(self.accept)
         outer.addWidget(close)
         self._category_selected(self.categories.selected_id())
+        self.refresh_entities()
+
+    def _entity_management_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(QLabel("人物與片商名稱各自管理；刪除名稱會一併移除該名稱的影片關聯。"))
+        self.entity_type = QComboBox()
+        self.entity_type.addItem("人物", "person")
+        self.entity_type.addItem("片商", "studio")
+        self.entity_type.currentIndexChanged.connect(lambda *_: self.refresh_entities())
+        layout.addWidget(self.entity_type)
+        self.entity_list = QListWidget()
+        self.entity_list.currentItemChanged.connect(self._entity_selected)
+        layout.addWidget(self.entity_list, 1)
+        self.entity_name = QLineEdit()
+        self.entity_name.setPlaceholderText("關聯名稱")
+        self.entity_name.returnPressed.connect(self.add_entity)
+        layout.addWidget(self.entity_name)
+        actions = QHBoxLayout()
+        for title, action in (("新增", self.add_entity), ("儲存名稱", self.rename_entity),
+                              ("刪除關聯名稱", self.delete_entity)):
+            button = QPushButton(title)
+            button.clicked.connect(action)
+            actions.addWidget(button)
+        layout.addLayout(actions)
+        return page
+
+    def refresh_entities(self, preferred: str | None = None) -> None:
+        if not hasattr(self, "entity_list"):
+            return
+        wanted = preferred or (self.entity_list.currentItem().data(Qt.UserRole)
+                               if self.entity_list.currentItem() else None)
+        self.entity_list.clear()
+        rows = repo.list_entities(self.connection, self.entity_type.currentData())
+        for row in rows:
+            item = QListWidgetItem(row["name"])
+            item.setData(Qt.UserRole, row["id"])
+            self.entity_list.addItem(item)
+            if row["id"] == wanted:
+                self.entity_list.setCurrentItem(item)
+        if self.entity_list.currentItem() is None and self.entity_list.count():
+            self.entity_list.setCurrentRow(0)
+        if self.entity_list.currentItem() is None:
+            self.entity_name.clear()
+
+    def _entity_selected(self, current, _previous=None) -> None:
+        self.entity_name.setText(current.text() if current else "")
+
+    def add_entity(self) -> None:
+        name = self.entity_name.text().strip()
+        if not name:
+            return
+        try:
+            identifier = repo.create_entity(self.connection, self.entity_type.currentData(), name)
+            self.refresh_entities(identifier)
+        except (sqlite3.Error, ValueError) as exc:
+            QMessageBox.critical(self, "新增關聯失敗", str(exc))
+
+    def rename_entity(self) -> None:
+        item = self.entity_list.currentItem()
+        if not item:
+            return
+        try:
+            repo.rename_entity(self.connection, item.data(Qt.UserRole), self.entity_name.text())
+            self.refresh_entities(item.data(Qt.UserRole))
+        except (sqlite3.Error, ValueError) as exc:
+            QMessageBox.critical(self, "修改名稱失敗", str(exc))
+
+    def delete_entity(self) -> None:
+        item = self.entity_list.currentItem()
+        if not item:
+            return
+        linked = self.connection.execute("SELECT COUNT(*) FROM video_entities WHERE entity_id=?",
+                                         (item.data(Qt.UserRole),)).fetchone()[0]
+        answer = QMessageBox.question(
+            self, "刪除關聯名稱",
+            f"確定刪除「{item.text()}」？這會移除 {linked} 部影片上的此關聯，不會刪除影片或標籤。",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        try:
+            repo.delete_entity(self.connection, item.data(Qt.UserRole))
+            self.entity_name.clear()
+            self.refresh_entities()
+        except (sqlite3.Error, ValueError) as exc:
+            QMessageBox.critical(self, "刪除關聯失敗", str(exc))
 
     @staticmethod
     def _heading(text: str) -> QLabel:

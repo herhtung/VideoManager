@@ -51,6 +51,7 @@ $migration6 = Join-Path $projectRoot "src\videomanager\db\migrations\006_compres
 $migration7 = Join-Path $projectRoot "src\videomanager\db\migrations\007_compression_flow.sql"
 $migration8 = Join-Path $projectRoot "src\videomanager\db\migrations\008_trash.sql"
 $migration9 = Join-Path $projectRoot "src\videomanager\db\migrations\009_remove_in_progress.sql"
+$migration10 = Join-Path $projectRoot "src\videomanager\db\migrations\010_entities.sql"
 $brandPng = Join-Path $projectRoot "assets\videomanager.png"
 $brandIco = Join-Path $projectRoot "assets\videomanager.ico"
 if (-not (Test-Path -LiteralPath $brandPng -PathType Leaf) -or -not (Test-Path -LiteralPath $brandIco -PathType Leaf)) {
@@ -71,6 +72,7 @@ $arguments = @(
     "--add-data", "$migration7;videomanager/db/migrations",
     "--add-data", "$migration8;videomanager/db/migrations",
     "--add-data", "$migration9;videomanager/db/migrations",
+    "--add-data", "$migration10;videomanager/db/migrations",
     "--add-data", "$(Join-Path $projectRoot 'packaging\THIRD_PARTY.md');third_party",
     "--add-data", "$(Join-Path $projectRoot 'packaging\third_party_licenses');third_party/licenses",
     "--add-binary", "$Ffmpeg;bin", "--add-binary", "$Ffprobe;bin"

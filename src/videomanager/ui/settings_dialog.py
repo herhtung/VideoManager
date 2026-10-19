@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QDialogButtonBox,
                                QFormLayout, QLabel, QPushButton, QScrollArea,
-                               QSpinBox, QVBoxLayout, QWidget)
+                               QDoubleSpinBox, QSpinBox, QVBoxLayout, QWidget)
 
 from videomanager.config import Settings
 from videomanager.ui.import_name_rules import ImportNameRulesEditor
@@ -47,6 +47,11 @@ class SettingsDialog(QDialog):
         self.hover.setRange(100, 2000)
         self.hover.setSuffix(" ms")
         self.hover.setValue(settings.hover_delay_ms)
+        self.related_hover = QDoubleSpinBox()
+        self.related_hover.setRange(1, 10)
+        self.related_hover.setSingleStep(0.5)
+        self.related_hover.setSuffix(" 秒")
+        self.related_hover.setValue(settings.related_hover_delay_ms / 1000)
         self.interval = QSpinBox()
         self.interval.setRange(100, 3000)
         self.interval.setSuffix(" ms")
@@ -58,6 +63,7 @@ class SettingsDialog(QDialog):
         form.addRow("預覽模式", self.mode)
         form.addRow("縮圖大小", self.size)
         form.addRow("懸停等待", self.hover)
+        form.addRow("相似影片浮欄延遲", self.related_hover)
         form.addRow("每張停留", self.interval)
         playback_note = QLabel("此處決定每次開啟影片時的預設播放器。影片內切換只對當次播放有效。")
         playback_note.setWordWrap(True)
@@ -103,6 +109,7 @@ class SettingsDialog(QDialog):
             preview_mode=self.mode.currentData(),
             preview_policy=previous.preview_policy,
             hover_delay_ms=self.hover.value(),
+            related_hover_delay_ms=round(self.related_hover.value() * 1000),
             frame_interval_ms=self.interval.value(),
             thumbnail_width=self.size.currentData(),
             scan_folders=previous.scan_folders,

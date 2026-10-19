@@ -56,6 +56,7 @@ class Settings:
     preview_mode: str = "standard"
     preview_policy: str = "auto"
     hover_delay_ms: int = 400
+    related_hover_delay_ms: int = 2000
     frame_interval_ms: int = 500
     thumbnail_width: int = 180
     scan_folders: tuple[str, ...] = ()
@@ -77,6 +78,8 @@ class Settings:
             raise ValueError("Unsupported preview policy")
         if not 100 <= self.hover_delay_ms <= 2000:
             raise ValueError("Hover delay must be 100–2000 ms")
+        if not 1000 <= self.related_hover_delay_ms <= 10000:
+            raise ValueError("Related video delay must be 1–10 seconds")
         if not 100 <= self.frame_interval_ms <= 3000:
             raise ValueError("Frame interval must be 100–3000 ms")
         if self.thumbnail_width not in {140, 180, 240}:
