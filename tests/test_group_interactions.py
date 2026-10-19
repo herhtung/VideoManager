@@ -20,7 +20,8 @@ from videomanager.services.library_service import open_library
 from videomanager.services.import_service import plan_group_import
 from videomanager.services.scanner import scan_library
 from videomanager.services.sync_service import synchronize
-from videomanager.services.video_group_service import list_groups
+from videomanager.services.trash_service import restore_video
+from videomanager.services.video_group_service import create_video_group, list_groups
 from videomanager.ui.group_order_dialog import GroupOrderDialog
 from videomanager.ui.main_window import MainWindow
 
@@ -132,6 +133,56 @@ class GroupInteractionTests(unittest.TestCase):
                     window.close_group_folder()
                     self.assertEqual(window.model.rowCount(), 1)
                     self.assertEqual(window.model.rows[0]["group_name"], "第二次改名")
+                    window.open_group_folder(groups[0]["id"])
+                    with patch.object(QMessageBox, "question", return_value=QMessageBox.No):
+                        window.group_dissolve_button.click()
+                    self.assertEqual(len(list_groups(window.connection, marker.library_id)), 1)
+                    with patch.object(QMessageBox, "question", return_value=QMessageBox.Yes):
+                        window.group_dissolve_button.click()
+                    self.assertEqual(list_groups(window.connection, marker.library_id), [])
+                    self.assertEqual(window.model.rowCount(), 2)
+                    self.assertTrue(all(not row.get("group_id") for row in window.model.rows))
+                    self.assertEqual(len(list(root.rglob("*.mp4"))), 2)
+                    self.assertEqual(window.connection.execute(
+                        "SELECT COUNT(*) FROM videos WHERE library_id=? AND deleted_at IS NULL",
+                        (marker.library_id,),
+                    ).fetchone()[0], 2)
+                finally:
+                    window.close()
+
+    def test_delete_whole_group_moves_all_parts_to_trash_and_restore_brings_group_back(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="vm-group-delete-") as directory:
+            base = Path(directory)
+            root = base / "library"
+            root.mkdir()
+            for name in ("part-1.mp4", "part-2.mp4"):
+                (root / name).write_bytes(b"disposable group part")
+            paths = AppPaths(base / "data")
+            marker = open_library(paths, root, create=True).marker
+            connection = open_database(paths.database, paths.backups)
+            try:
+                synchronize(connection, marker.library_id, root, scan_library(root, marker.library_id))
+                ids = [row[0] for row in connection.execute("SELECT id FROM videos ORDER BY file_name")]
+                group_id = create_video_group(connection, marker.library_id, "可刪除測試組", ids)
+            finally:
+                connection.close()
+            with patch.object(MainWindow, "start_scan"):
+                window = MainWindow(paths)
+                try:
+                    window.show()
+                    self.app.processEvents()
+                    with patch.object(QMessageBox, "exec", return_value=QMessageBox.Yes):
+                        window.recycle_group(group_id)
+                    self.assertEqual(window.connection.execute(
+                        "SELECT COUNT(*) FROM trash_entries"
+                    ).fetchone()[0], 2)
+                    self.assertEqual(list_groups(window.connection, marker.library_id), [])
+                    self.assertEqual(len(list((root / ".videomanager" / "trash").glob("*.mp4"))), 2)
+                    for video_id in ids:
+                        restore_video(window.connection, marker.library_id, root, video_id)
+                    self.assertEqual(len(list_groups(window.connection, marker.library_id)), 1)
+                    self.assertEqual(list_groups(window.connection, marker.library_id)[0]["part_count"], 2)
+                    self.assertEqual(len(list(root.glob("part-*.mp4"))), 2)
                 finally:
                     window.close()
 

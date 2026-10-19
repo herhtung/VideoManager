@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
 )
 
 
+from videomanager.ui.notifications import notify_information
 class PhraseRow(QFrame):
     def __init__(self, editor: "ImportNameRulesEditor", phrase: str) -> None:
         super().__init__(editor)
@@ -114,13 +115,13 @@ class ImportNameRulesEditor(QWidget):
     def valid_phrase(self, text: str, *, exclude: PhraseRow | None = None) -> str | None:
         value = text.strip()
         if not value:
-            QMessageBox.information(self, "請輸入字句", "請輸入要從檔名移除的字句。")
+            notify_information(self, "請輸入字句", "請輸入要從檔名移除的字句。")
             return None
         if "\n" in value or "\r" in value:
             QMessageBox.warning(self, "字句格式錯誤", "每條規則只能是一行字句。")
             return None
         if any(row is not exclude and row.phrase.casefold() == value.casefold() for row in self.rows):
-            QMessageBox.information(self, "字句已存在", "這條清理規則已經加入。")
+            notify_information(self, "字句已存在", "這條清理規則已經加入。")
             return None
         return value
 

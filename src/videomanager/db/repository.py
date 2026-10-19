@@ -114,7 +114,13 @@ def list_videos(
     sql = (
         """SELECT v.*, j.state AS thumbnail_state, j.cache_signature AS thumbnail_signature,
                   gm.group_id, gm.position AS group_position, g.name AS group_name,
-                  (SELECT COUNT(*) FROM video_group_members WHERE group_id = gm.group_id) AS group_size
+                  (SELECT COUNT(*) FROM video_group_members WHERE group_id = gm.group_id) AS group_size,
+                  EXISTS (
+                      SELECT 1 FROM compression_jobs cj
+                      JOIN compression_replacements cr ON cr.job_id = cj.id
+                      WHERE cj.video_id = v.id AND cj.status = 'replaced'
+                        AND cr.state IN ('complete', 'original_expired')
+                  ) AS is_compressed
            FROM videos v LEFT JOIN thumbnail_jobs j ON j.video_id = v.id
            LEFT JOIN video_group_members gm ON gm.video_id = v.id
            LEFT JOIN video_groups g ON g.id = gm.group_id WHERE """

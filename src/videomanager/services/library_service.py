@@ -6,7 +6,7 @@ from dataclasses import dataclass, replace
 from contextlib import closing
 from pathlib import Path
 
-from videomanager.config import AppPaths, Settings, load_settings, save_settings
+from videomanager.config import AppPaths, load_settings, save_settings
 from videomanager.db.database import DatabaseError, backup_database, open_database, register_library, utc_now
 from videomanager.services.library_locator import (
     LibraryMarker,
@@ -42,17 +42,8 @@ def open_library(paths: AppPaths, root: Path, *, create: bool = False) -> Opened
     finally:
         connection.close()
     previous = load_settings(paths.settings)
-    save_settings(paths.settings, Settings(
-        library_id=marker.library_id,
-        last_root_path=str(root),
-        preview_mode=previous.preview_mode,
-        preview_policy=previous.preview_policy,
-        hover_delay_ms=previous.hover_delay_ms,
-        frame_interval_ms=previous.frame_interval_ms,
-        thumbnail_width=previous.thumbnail_width,
-        scan_folders=previous.scan_folders,
-        import_remove_phrases=previous.import_remove_phrases,
-    ))
+    save_settings(paths.settings, replace(previous, library_id=marker.library_id,
+                                          last_root_path=str(root)))
     return OpenedLibrary(root, marker)
 
 

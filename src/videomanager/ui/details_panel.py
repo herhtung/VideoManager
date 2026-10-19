@@ -62,6 +62,7 @@ class DetailsPanel(QWidget):
         self.library_id: str | None = None
         self.video_id: str | None = None
         self.group_id: str | None = None
+        self.batch_ids: list[str] = []
         self._saved_state: tuple | None = None
         self.title = QLineEdit()
         self.title_label = QLabel("顯示名稱")
@@ -105,15 +106,15 @@ class DetailsPanel(QWidget):
         layout.addLayout(status_row)
         layout.addWidget(self.file_info)
         buttons = QHBoxLayout()
-        save = QPushButton("儲存")
-        save.clicked.connect(lambda: self.save_current())
-        done = QPushButton("完成整理")
-        done.clicked.connect(lambda: self.finish_current())
-        skip = QPushButton("跳過")
-        skip.clicked.connect(lambda: self.skipped.emit())
-        buttons.addWidget(save)
-        buttons.addWidget(done)
-        buttons.addWidget(skip)
+        self.save_button = QPushButton("儲存")
+        self.save_button.clicked.connect(lambda: self.save_current())
+        self.done_button = QPushButton("完成整理")
+        self.done_button.clicked.connect(lambda: self.finish_current())
+        self.skip_button = QPushButton("跳過")
+        self.skip_button.clicked.connect(lambda: self.skipped.emit())
+        buttons.addWidget(self.save_button)
+        buttons.addWidget(self.done_button)
+        buttons.addWidget(self.skip_button)
         layout.addLayout(buttons)
 
     def set_library(self, root: Path | None, library_id: str | None) -> None:
@@ -125,9 +126,14 @@ class DetailsPanel(QWidget):
             self.set_video(self.video_id)
 
     def set_video(self, video_id: str | None) -> None:
+        self.batch_ids = []
         self.group_id = None
         self.video_id = video_id
         self.title_label.setText("顯示名稱")
+        for widget in (self.title, self.rating, self.favorite, self.recorded, self.notes,
+                       self.done_button, self.skip_button):
+            widget.setEnabled(True)
+        self.save_button.setText("儲存")
         enabled = video_id is not None
         self.setEnabled(enabled)
         self.tags.connection = self.connection
@@ -159,6 +165,23 @@ class DetailsPanel(QWidget):
         self.tags.reload()
         self._capture_state()
 
+    def set_batch(self, video_ids: list[str]) -> None:
+        """Only tag empty, ungrouped videos through the right pane."""
+        self.set_video(None)
+        self.batch_ids = list(dict.fromkeys(video_ids))
+        self.setEnabled(True)
+        self.title_label.setText("批次標籤")
+        self.title.setText(f"已選 {len(self.batch_ids)} 部未標記影片")
+        for widget in (self.title, self.rating, self.favorite, self.recorded, self.notes,
+                       self.done_button, self.skip_button):
+            widget.setEnabled(False)
+        self.tags.set_selected(set())
+        self.tags.reload()
+        self.status.setText("批次加入標籤")
+        self.file_info.setText("按標籤後選「套用標籤」；影片名稱及其他資料不會改變。")
+        self.save_button.setText("套用標籤")
+        self._capture_state()
+
     def set_group(self, group_id: str) -> None:
         group = self.connection.execute(
             "SELECT name FROM video_groups WHERE id = ?", (group_id,),
@@ -179,7 +202,7 @@ class DetailsPanel(QWidget):
         self._capture_state()
 
     def _form_state(self) -> tuple:
-        return (self.video_id, self.group_id, self.title.text(), self.rating.value(),
+        return (self.video_id, self.group_id, tuple(self.batch_ids), self.title.text(), self.rating.value(),
                 self.favorite.isChecked(), self.recorded.text(), self.notes.toPlainText(),
                 frozenset(self.tags.selected_ids()))
 
@@ -187,10 +210,10 @@ class DetailsPanel(QWidget):
         self._saved_state = self._form_state()
 
     def is_dirty(self) -> bool:
-        return self.video_id is not None and self._form_state() != self._saved_state
+        return (self.video_id is not None or bool(self.batch_ids)) and self._form_state() != self._saved_state
 
     def quick_add_tag(self) -> None:
-        if self.video_id is None:
+        if self.video_id is None and not self.batch_ids:
             return
         dialog = TagCreateDialog(self.connection, self)
         if dialog.exec() and dialog.created_tag_id:
@@ -199,6 +222,27 @@ class DetailsPanel(QWidget):
             self.tags.reload()
 
     def save_current(self, *, complete: bool = False, return_to_queue: bool = False) -> bool:
+        if self.batch_ids:
+            if complete or return_to_queue:
+                return False
+            ids = self.batch_ids
+            placeholders = ",".join("?" for _ in ids)
+            eligible = self.connection.execute(
+                f"""SELECT COUNT(*) FROM videos v WHERE v.id IN ({placeholders})
+                    AND v.deleted_at IS NULL AND v.missing_since IS NULL
+                    AND NOT EXISTS (SELECT 1 FROM video_tags vt WHERE vt.video_id = v.id)""", ids,
+            ).fetchone()[0]
+            if eligible != len(ids):
+                QMessageBox.warning(self, "無法批次套用", "選取影片已有標籤或已不可用，請重新選取。")
+                return False
+            with self.connection:
+                self.connection.executemany(
+                    "INSERT OR IGNORE INTO video_tags(video_id, tag_id) VALUES (?, ?)",
+                    ((video_id, tag_id) for video_id in ids for tag_id in self.tags.selected_ids()),
+                )
+            self._capture_state()
+            self.saved.emit()
+            return True
         if self.video_id is None:
             return False
         title = self.title.text().strip()

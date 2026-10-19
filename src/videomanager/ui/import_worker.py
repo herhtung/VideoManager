@@ -59,6 +59,7 @@ class ImportPlanWorker(QThread):
 
 class ImportWorker(QThread):
     progress = Signal(str)
+    bytes_progress = Signal(int, int, int, int)
     outcome = Signal(object)
 
     def __init__(self, items: list[ImportItem], root: Path, library_id: str, parent=None) -> None:
@@ -78,7 +79,11 @@ class ImportWorker(QThread):
                 break
             self.progress.emit(f"搬入影片庫 {index}/{len(self.items)}：{item.source.name}")
             try:
-                result = import_mp4(item, self.root, self.library_id, cancelled=self.isInterruptionRequested)
+                result = import_mp4(
+                    item, self.root, self.library_id, cancelled=self.isInterruptionRequested,
+                    progress=lambda done, total, position=index: self.bytes_progress.emit(
+                        position, len(self.items), done, total),
+                )
                 completed.append(str(result.destination))
                 if result.source_retained:
                     retained.append(str(item.source))

@@ -31,7 +31,9 @@ def list_groups(connection: sqlite3.Connection, library_id: str) -> list[sqlite3
     return connection.execute(
         """SELECT g.*, COUNT(m.video_id) AS part_count
            FROM video_groups g JOIN video_group_members m ON m.group_id = g.id
-           WHERE g.library_id = ? GROUP BY g.id ORDER BY g.name COLLATE NOCASE""",
+           JOIN videos v ON v.id = m.video_id
+           WHERE g.library_id = ? AND v.deleted_at IS NULL
+           GROUP BY g.id ORDER BY g.name COLLATE NOCASE""",
         (library_id,),
     ).fetchall()
 
@@ -205,6 +207,62 @@ def set_group_members(connection: sqlite3.Connection, group_id: str,
             ((video_id, group_id, position) for position, video_id in enumerate(ids, 1)),
         )
         _share_relations(connection, ids)
+
+
+def add_group_members(connection: sqlite3.Connection, group_id: str,
+                      video_ids: Iterable[str]) -> int:
+    """Attach ungrouped videos, keeping their files and individual titles in place."""
+    group = connection.execute("SELECT library_id FROM video_groups WHERE id = ?", (group_id,)).fetchone()
+    if group is None:
+        raise VideoGroupError("找不到影片組。")
+    existing = group_members(connection, group_id)
+    if not existing:
+        raise VideoGroupError("影片組沒有原有分段。")
+    ids = list(dict.fromkeys(video_ids))
+    if not ids:
+        return 0
+    _validated_members(connection, group["library_id"], [existing[0]["id"], *ids], group_id)
+    if any(group_for_video(connection, video_id) is not None for video_id in ids):
+        raise VideoGroupError("只能加入尚未分組的影片。")
+    first = existing[0]
+    tags = [row[0] for row in connection.execute(
+        "SELECT tag_id FROM video_tags WHERE video_id = ?", (first["id"],))]
+    with connection:
+        connection.executemany(
+            "INSERT INTO video_group_members(video_id, group_id, position) VALUES (?, ?, ?)",
+            ((video_id, group_id, len(existing) + position) for position, video_id in enumerate(ids, 1)),
+        )
+        connection.executemany(
+            """UPDATE videos SET notes = ?, rating = ?, is_favorite = ?, recorded_at = ?, status = ?
+               WHERE id = ?""",
+            ((first["notes"], first["rating"], first["is_favorite"], first["recorded_at"],
+              first["status"], video_id) for video_id in ids),
+        )
+        connection.executemany("DELETE FROM video_tags WHERE video_id = ?", ((video_id,) for video_id in ids))
+        connection.executemany(
+            "INSERT INTO video_tags(video_id, tag_id) VALUES (?, ?)",
+            ((video_id, tag_id) for video_id in ids for tag_id in tags),
+        )
+    return len(ids)
+
+
+def remove_group_member(connection: sqlite3.Connection, group_id: str, video_id: str) -> bool:
+    """Unlink one part; dissolve a one-part remainder. Never move or delete MP4s."""
+    ids = [row["id"] for row in group_members(connection, group_id)]
+    if video_id not in ids:
+        raise VideoGroupError("這部影片不在指定影片組。")
+    with connection:
+        connection.execute("DELETE FROM video_group_members WHERE video_id = ? AND group_id = ?",
+                           (video_id, group_id))
+        remaining = [identifier for identifier in ids if identifier != video_id]
+        if len(remaining) < 2:
+            connection.execute("DELETE FROM video_groups WHERE id = ?", (group_id,))
+            return True
+        connection.executemany(
+            "UPDATE video_group_members SET position = ? WHERE video_id = ?",
+            ((position, identifier) for position, identifier in enumerate(remaining, 1)),
+        )
+    return False
 
 
 def rename_group(connection: sqlite3.Connection, group_id: str, name: str) -> None:

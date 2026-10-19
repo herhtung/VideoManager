@@ -18,18 +18,21 @@ def library_stats(connection: sqlite3.Connection, library_id: str) -> dict:
                   COALESCE(SUM(file_size), 0) AS total_bytes,
                   COALESCE(SUM(duration_ms), 0) AS duration_ms,
                   COALESCE(SUM(is_favorite), 0) AS favorites,
-                  COALESCE(SUM(CASE WHEN missing_since IS NOT NULL THEN 1 ELSE 0 END), 0) AS missing,
                   COALESCE(SUM(CASE WHEN status = 'unprocessed' THEN 1 ELSE 0 END), 0) AS unprocessed,
                   COALESCE(SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END), 0) AS in_progress,
                   COALESCE(SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END), 0) AS done
-           FROM videos WHERE library_id = ? AND deleted_at IS NULL""",
+           FROM videos WHERE library_id = ? AND deleted_at IS NULL AND missing_since IS NULL""",
         (library_id,),
     ).fetchone()
+    missing = connection.execute(
+        """SELECT COUNT(*) FROM videos WHERE library_id=? AND deleted_at IS NULL
+           AND missing_since IS NOT NULL""", (library_id,),
+    ).fetchone()[0]
     groups = connection.execute(
         """SELECT COUNT(DISTINCT g.id) FROM video_groups g
            JOIN video_group_members m ON m.group_id = g.id
            JOIN videos v ON v.id = m.video_id
-           WHERE g.library_id = ? AND v.deleted_at IS NULL""",
+           WHERE g.library_id = ? AND v.deleted_at IS NULL AND v.missing_since IS NULL""",
         (library_id,),
     ).fetchone()[0]
     tags = connection.execute(
@@ -37,12 +40,15 @@ def library_stats(connection: sqlite3.Connection, library_id: str) -> dict:
                   t.name AS tag_name, COUNT(DISTINCT v.id) AS video_count
            FROM tag_groups tg JOIN tags t ON t.group_id = tg.id
            LEFT JOIN video_tags vt ON vt.tag_id = t.id
-           LEFT JOIN videos v ON v.id = vt.video_id AND v.library_id = ? AND v.deleted_at IS NULL
+           LEFT JOIN videos v ON v.id = vt.video_id AND v.library_id = ?
+                             AND v.deleted_at IS NULL AND v.missing_since IS NULL
            GROUP BY tg.id, t.id
            ORDER BY tg.sort_order, tg.name, t.sort_order, t.name""",
         (library_id,),
     ).fetchall()
-    return {"overview": dict(overview), "groups": groups, "tags": [dict(row) for row in tags]}
+    summary = dict(overview)
+    summary["missing"] = missing
+    return {"overview": summary, "groups": groups, "tags": [dict(row) for row in tags]}
 
 
 def readable_size(size: int) -> str:
@@ -130,7 +136,7 @@ class StatsDialog(QDialog):
             ("總片長", readable_duration(overview["duration_ms"])),
             ("影片組", f"{data['groups']:,} 組"),
             ("收藏", f"{overview['favorites']:,} 部"),
-            ("檔案不在原位置", f"{overview['missing']:,} 部"),
+            ("索引中找不到檔案", f"{overview['missing']:,} 部"),
         )
         for index, (label, value) in enumerate(metrics):
             card = QFrame()
@@ -140,6 +146,8 @@ class StatsDialog(QDialog):
             card_layout.setSpacing(4)
             caption = QLabel(label)
             caption.setObjectName("statsCaption")
+            if label == "索引中找不到檔案":
+                caption.setToolTip("資料庫保留記錄，但掃描時原路徑沒有找到 MP4。此數量不計入可用影片總數。")
             number = QLabel(value)
             number.setObjectName("statsNumber")
             card_layout.addWidget(caption)
@@ -197,7 +205,7 @@ class StatsDialog(QDialog):
         self.tags.expandAll()
         self.search.textChanged.connect(self._filter_tags)
         layout.addWidget(self.tags, 1)
-        footnote = QLabel("數量依目前影片庫索引計算；同組的每個 MP4 分段各算一部。")
+        footnote = QLabel("可用影片與標籤比例不含找不到檔案的記錄；同組每個 MP4 分段各算一部。")
         footnote.setObjectName("statsMuted")
         layout.addWidget(footnote)
         close = QPushButton("關閉")

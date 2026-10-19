@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QPushButton, QScrollArea, QVBoxLayout, QWidget, QGridLayout,
 )
 
+from videomanager.ui.notifications import notify_information
 from videomanager.db import repository as repo
 from videomanager.ui.tag_picker import CategoryChooser, TagPicker
 
@@ -272,7 +273,7 @@ class MetadataDialog(QDialog):
         tag_id = self._selected_tag_id
         category_id = self.categories.selected_id()
         if tag_id is None or category_id is None:
-            QMessageBox.information(self, "請先選擇", "先點選既有標籤，再選右側的目標標籤分類。")
+            notify_information(self, "請先選擇", "先點選既有標籤，再選右側的目標標籤分類。")
             return
         self._run(lambda: repo.move_tag_to_group(self.connection, tag_id, category_id),
                   preferred_category=category_id, preferred_tag=tag_id)

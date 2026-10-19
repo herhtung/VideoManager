@@ -40,10 +40,14 @@ class VideoModel(QAbstractListModel):
             return row["id"]
         if role == Qt.ToolTipRole:
             if is_group_cover:
-                return f"影片組：{row['group_name']}（{row['group_size']} 段）\n點「播放」接續播放；點「開啟分段」查看各段。"
+                compressed = row.get("compressed_count", 0)
+                status = f"\n已壓縮 {compressed}/{row['group_size']} 段" if compressed else ""
+                return (f"影片組：{row['group_name']}（{row['group_size']} 段）{status}"
+                        "\n點「播放」接續播放；點「開啟分段」查看各段。")
             group = (f"\n影片組：{row['group_name']}（第 {row['group_position']}/{row['group_size']} 段）"
                      if row.get("group_id") else "")
-            return f"{row['display_title']}\n{row.get('relative_path', '')}{group}"
+            compressed = "\n已壓縮" if row.get("is_compressed") else ""
+            return f"{row['display_title']}\n{row.get('relative_path', '')}{group}{compressed}"
         if role == Qt.DisplayRole:
             if is_group_cover:
                 return f"{row['group_name']}\n{row['group_size']} 段"
@@ -169,6 +173,21 @@ class VideoDelegate(QStyledItemDelegate):
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
         painter.drawPixmap(target, pixmap, source)
 
+    @staticmethod
+    def _draw_compressed_badge(painter: QPainter, text_x: int, title_y: int,
+                               text_width: int, label: str) -> int:
+        """Place a quiet badge on the right of the card title and return its text width."""
+        badge_width = 92 if "/" in label else 62
+        badge = QRect(text_x + text_width - badge_width, title_y + 1, badge_width, 19)
+        painter.save()
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#286660"))
+        painter.drawRoundedRect(badge, 5, 5)
+        painter.setPen(QColor("#f0fffc"))
+        painter.drawText(badge, Qt.AlignCenter, label)
+        painter.restore()
+        return max(0, text_width - badge_width - 6)
+
     def _paint_group_cover(self, painter: QPainter, option, index: QModelIndex,
                            image_rect: QRect, title_y: int, text_x: int, text_width: int) -> None:
         row = self.view.model().rows[index.row()]
@@ -193,6 +212,10 @@ class VideoDelegate(QStyledItemDelegate):
         painter.fillRect(badge, QColor("#162c36"))
         painter.setPen(QColor("#d4f7f3"))
         painter.drawText(badge, Qt.AlignCenter, f"影片組 {row['group_size']} 段")
+        compressed = row.get("compressed_count", 0)
+        if compressed:
+            label = "已壓縮" if compressed == row["group_size"] else f"已壓縮 {compressed}/{row['group_size']}"
+            text_width = self._draw_compressed_badge(painter, text_x, title_y, text_width, label)
         title = option.fontMetrics.elidedText(row["group_name"], Qt.ElideRight, text_width)
         painter.setPen(option.palette.highlightedText().color() if option.state & QStyle.State_Selected else option.palette.text().color())
         painter.drawText(QRect(text_x, title_y, text_width, 20), Qt.AlignLeft | Qt.AlignVCenter, title)
@@ -253,6 +276,8 @@ class VideoDelegate(QStyledItemDelegate):
             painter.setPen(option.palette.highlightedText().color())
             painter.drawText(badge, Qt.AlignCenter, f"{group_position}/{group_size}")
         title, _, details = (index.data(Qt.DisplayRole) or "").partition("\n")
+        if self.view.model().rows[index.row()].get("is_compressed"):
+            text_width = self._draw_compressed_badge(painter, text_x, title_y, text_width, "已壓縮")
         painter.setPen(option.palette.highlightedText().color() if selected else option.palette.text().color())
         painter.drawText(QRect(text_x, title_y, text_width, 22), Qt.AlignLeft | Qt.AlignVCenter,
                          option.fontMetrics.elidedText(title, Qt.ElideRight, text_width))
@@ -282,6 +307,7 @@ class BrowserView(QListView):
         self.setViewMode(QListView.IconMode)
         self.setResizeMode(QListView.Fixed)
         self.setMovement(QListView.Free)
+        self.setDragEnabled(False)
         self.setUniformItemSizes(True)
         self.setSpacing(10)
         self.setIconSize(QSize(180, 104))
@@ -400,8 +426,6 @@ class BrowserView(QListView):
             self.clearSelection()
             self.selectionModel().clearCurrentIndex()
             self.blank_clicked.emit()
-            event.accept()
-            return
         super().mousePressEvent(event)
 
     def viewportEvent(self, event) -> bool:

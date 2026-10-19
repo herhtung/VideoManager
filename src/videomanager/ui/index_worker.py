@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
-from datetime import datetime, timedelta, timezone
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
 from videomanager.config import AppPaths
 from videomanager.db.database import open_database
-from videomanager.services.cleanup_service import cleanup_missing_records
+from videomanager.services.cleanup_service import cleanup_missing_records, purge_confirmed_missing
 from videomanager.services.file_operations import recover_file_operations
 from videomanager.services.index_service import process_pending_media, requeue_first_frame_failures
 from videomanager.services.scanner import scan_library
@@ -51,7 +50,7 @@ class IndexWorker(QThread):
                 result = cleanup_missing_records(
                     connection, self.root, self.library_id, self.paths.cache,
                     immediate=True, cancelled=self.isInterruptionRequested,
-                    scan_folders=self.scan_folders,
+                    scan_folders=self.scan_folders, backup_dir=self.paths.backups,
                 )
                 self.synced.emit(asdict(result.scan))
                 self.outcome.emit(
@@ -68,21 +67,20 @@ class IndexWorker(QThread):
             if self.isInterruptionRequested():
                 return
             result = synchronize(connection, self.library_id, self.root, scanned)
+            deleted, errors = purge_confirmed_missing(
+                connection, self.root, self.library_id, self.paths.cache,
+                {video.path_key for video in scanned}, immediate=True,
+                cancelled=self.isInterruptionRequested, backup_dir=self.paths.backups,
+            )
+            if deleted or errors:
+                self.progress.emit(f"找不到檔案：移除 {deleted} 筆索引；快取錯誤 {len(errors)} 筆。")
+            remaining = connection.execute(
+                "SELECT COUNT(*) FROM videos WHERE library_id=? AND deleted_at IS NULL AND missing_since IS NOT NULL",
+                (self.library_id,),
+            ).fetchone()[0]
+            result = replace(result, pending_cleanup=remaining)
             requeue_first_frame_failures(connection)
             self.synced.emit(asdict(result))
-            cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
-            aged = connection.execute(
-                "SELECT 1 FROM videos WHERE library_id = ? AND missing_since <= ? LIMIT 1",
-                (self.library_id, cutoff),
-            ).fetchone()
-            if aged and not self.isInterruptionRequested():
-                cleanup = cleanup_missing_records(
-                    connection, self.root, self.library_id, self.paths.cache,
-                    immediate=False, cancelled=self.isInterruptionRequested,
-                    scan_folders=self.scan_folders,
-                )
-                self.synced.emit(asdict(cleanup.scan))
-                self.progress.emit(f"逾期待清理記錄：移除 {cleanup.deleted_records} 筆。")
             if self.preview_policy == "paused" or (self.preview_policy == "auto" and result.total > 100):
                 self.outcome.emit(
                     f"清單已建立：{result.total} 部。大量影格預覽已暫緩；可按「開始預覽」在背景繼續。"

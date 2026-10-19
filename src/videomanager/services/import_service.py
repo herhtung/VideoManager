@@ -157,7 +157,8 @@ def plan_group_import(root: Path, library_id: str, sources: Iterable[Path], *,
     return result
 
 
-def import_mp4(item: ImportItem, root: Path, library_id: str, *, cancelled: Callable[[], bool] = lambda: False) -> ImportResult:
+def import_mp4(item: ImportItem, root: Path, library_id: str, *, cancelled: Callable[[], bool] = lambda: False,
+               progress: Callable[[int, int], None] = lambda done, total: None) -> ImportResult:
     """Move on one volume; otherwise copy safely, then recycle the source."""
     root = _verified_root(root, library_id)
     source, destination = item.source, item.destination
@@ -187,10 +188,12 @@ def import_mp4(item: ImportItem, root: Path, library_id: str, *, cancelled: Call
             os.rename(source, destination)
         except OSError as exc:
             raise FileOperationError(f"搬移失敗：{exc}") from exc
+        progress(item.size, item.size)
         return ImportResult(destination)
 
     temporary = destination.parent / f".{uuid4().hex}.importing"
     try:
+        copied = 0
         with source.open("rb") as reader, temporary.open("xb") as writer:
             while True:
                 if cancelled():
@@ -199,6 +202,8 @@ def import_mp4(item: ImportItem, root: Path, library_id: str, *, cancelled: Call
                 if not block:
                     break
                 writer.write(block)
+                copied += len(block)
+                progress(copied, item.size)
             writer.flush()
             os.fsync(writer.fileno())
         current = source.stat()

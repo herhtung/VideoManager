@@ -9,8 +9,8 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QImage
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtGui import QColor, QImage, QMouseEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -34,6 +34,34 @@ class GroupBrowserTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
 
+    def test_selection_box_can_start_on_blank_space_without_moving_cards(self) -> None:
+        model = VideoModel(Path("unused-cache"))
+        model.set_rows([video("one"), video("two"), video("three")])
+        browser = BrowserView(model)
+        browser.resize(700, 400)
+        browser.show()
+        try:
+            self.app.processEvents()
+            browser._reflow_cards()
+            self.app.processEvents()
+            original = [browser.visualRect(model.index(i)) for i in range(3)]
+            self.assertFalse(browser.indexAt(QPoint(5, 50)).isValid())
+            self.assertFalse(browser.dragEnabled())
+
+            def send(kind, x: int, y: int, button, buttons) -> None:
+                point = QPointF(x, y)
+                event = QMouseEvent(kind, point, point, button, buttons, Qt.NoModifier)
+                QApplication.sendEvent(browser.viewport(), event)
+                self.app.processEvents()
+
+            send(QEvent.MouseButtonPress, 5, 50, Qt.LeftButton, Qt.LeftButton)
+            send(QEvent.MouseMove, 450, 200, Qt.NoButton, Qt.LeftButton)
+            send(QEvent.MouseButtonRelease, 450, 200, Qt.LeftButton, Qt.NoButton)
+            self.assertEqual({index.row() for index in browser.selectedIndexes()}, {0, 1, 2})
+            self.assertEqual([browser.visualRect(model.index(i)) for i in range(3)], original)
+        finally:
+            browser.close()
+
     def test_folder_card_is_compact_playable_and_opens_segments(self) -> None:
         with tempfile.TemporaryDirectory(prefix="vm-browser-group-") as directory:
             cache = Path(directory)
@@ -44,10 +72,12 @@ class GroupBrowserTests(unittest.TestCase):
                 image.fill(QColor(color))
                 self.assertTrue(image.save(str(folder / "00.webp"), "WEBP"))
             source = [video("second", 2), video("single"), video("first", 1)]
+            source[2]["is_compressed"] = 1
             rows = compact_browser_rows(source)
             self.assertEqual(len(rows), 2)
             self.assertEqual(rows[0]["id"], "single")
             self.assertTrue(rows[1]["_group_cover"])
+            self.assertEqual(rows[1]["compressed_count"], 1)
             self.assertEqual([member["id"] for member in rows[1]["_group_members"]], ["first", "second"])
             model = VideoModel(cache)
             browser = BrowserView(model)

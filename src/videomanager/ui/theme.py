@@ -36,7 +36,9 @@ def apply_theme(app: QApplication) -> None:
         QMenu { background: #1b2831; color: #eaf0f2; border: 1px solid #334751; padding: 5px; }
         QMenu::item { padding: 6px 22px; }
         QPushButton { background: #22333d; color: #eaf0f2; border: 1px solid #3a515a;
-                      border-radius: 7px; padding: 6px 11px; min-height: 27px; }
+                      border-radius: 7px; padding: 4px 8px; min-height: 23px; }
+        QPushButton#navAction { padding: 3px 6px; min-height: 21px; }
+        QPushButton#statusAction { padding: 1px 7px; min-height: 19px; }
         QPushButton:hover { background: #2d4650; border-color: #5d928f; }
         QPushButton:pressed { background: #1c4547; }
         QPushButton:disabled { color: #70838b; background: #1b252b; border-color: #2c3940; }

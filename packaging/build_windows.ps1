@@ -3,6 +3,7 @@ param(
     [string]$Ffmpeg = "",
     [string]$Ffprobe = "",
     [string]$FfmpegDir = "",
+    [string]$MpvDir = "",
     [string]$DistPath = "dist"
 )
 
@@ -46,6 +47,9 @@ $migration2 = Join-Path $projectRoot "src\videomanager\db\migrations\002_unique_
 $migration3 = Join-Path $projectRoot "src\videomanager\db\migrations\003_video_groups.sql"
 $migration4 = Join-Path $projectRoot "src\videomanager\db\migrations\004_tags_only.sql"
 $migration5 = Join-Path $projectRoot "src\videomanager\db\migrations\005_required_tag_groups.sql"
+$migration6 = Join-Path $projectRoot "src\videomanager\db\migrations\006_compression.sql"
+$migration7 = Join-Path $projectRoot "src\videomanager\db\migrations\007_compression_flow.sql"
+$migration8 = Join-Path $projectRoot "src\videomanager\db\migrations\008_trash.sql"
 $brandPng = Join-Path $projectRoot "assets\videomanager.png"
 $brandIco = Join-Path $projectRoot "assets\videomanager.ico"
 if (-not (Test-Path -LiteralPath $brandPng -PathType Leaf) -or -not (Test-Path -LiteralPath $brandIco -PathType Leaf)) {
@@ -62,6 +66,9 @@ $arguments = @(
     "--add-data", "$migration3;videomanager/db/migrations",
     "--add-data", "$migration4;videomanager/db/migrations",
     "--add-data", "$migration5;videomanager/db/migrations",
+    "--add-data", "$migration6;videomanager/db/migrations",
+    "--add-data", "$migration7;videomanager/db/migrations",
+    "--add-data", "$migration8;videomanager/db/migrations",
     "--add-data", "$(Join-Path $projectRoot 'packaging\THIRD_PARTY.md');third_party",
     "--add-data", "$(Join-Path $projectRoot 'packaging\third_party_licenses');third_party/licenses",
     "--add-binary", "$Ffmpeg;bin", "--add-binary", "$Ffprobe;bin"
@@ -71,9 +78,23 @@ if ($ffmpegBin) {
         $arguments += @("--add-binary", "$($dll.FullName);bin")
     }
     $ffmpegLicense = Join-Path (Split-Path $ffmpegBin -Parent) "LICENSE.txt"
+    if (-not (Test-Path -LiteralPath $ffmpegLicense -PathType Leaf)) {
+        $ffmpegLicense = Join-Path (Split-Path $ffmpegBin -Parent) "LICENSE"
+    }
     if (Test-Path -LiteralPath $ffmpegLicense -PathType Leaf) {
         $arguments += @("--add-data", "$ffmpegLicense;third_party")
     }
+}
+if ($MpvDir) {
+    $mpvRoot = (Resolve-Path -LiteralPath $MpvDir -ErrorAction Stop).Path
+    $mpvDll = Join-Path $mpvRoot "libmpv-2.dll"
+    $mpvLicense = Join-Path $mpvRoot "LICENSE.LGPL"
+    if (-not (Test-Path -LiteralPath $mpvDll -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $mpvLicense -PathType Leaf)) {
+        throw "LGPL libmpv DLL or license not found in $mpvRoot"
+    }
+    $arguments += @("--add-binary", "$mpvDll;mpv")
+    $arguments += @("--add-data", "$mpvLicense;third_party/licenses")
 }
 if (Test-Path -LiteralPath (Join-Path $projectRoot "LICENSE.md")) {
     $arguments += @("--add-data", "$(Join-Path $projectRoot 'LICENSE.md');.")

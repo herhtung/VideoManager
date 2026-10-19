@@ -194,7 +194,10 @@ class ServiceTests(unittest.TestCase):
         with self.assertRaises(ImportCancelled):
             import_mp4(items[0], self.root, self.library_id, cancelled=lambda: True)
         self.assertTrue(sources[0].exists())
-        destination = import_mp4(items[0], self.root, self.library_id).destination
+        reported = []
+        destination = import_mp4(items[0], self.root, self.library_id,
+                                 progress=lambda copied, size: reported.append((copied, size))).destination
+        self.assertEqual(reported[-1], (items[0].size, items[0].size))
         self.assertFalse(sources[0].exists())
         self.assertTrue(destination.exists())
         self.assertEqual(self.sync().added, 2)
@@ -287,6 +290,17 @@ class ServiceTests(unittest.TestCase):
         result = cleanup_missing_records(self.connection, self.root, self.library_id, self.paths.cache, immediate=True)
         self.assertEqual(result.deleted_records, 1)
         self.assertIsNone(self.first_video())
+
+    def test_cleanup_keeps_existing_video_outside_current_scan_folders(self) -> None:
+        self.sync()
+        video_id = self.first_video()["id"]
+        result = cleanup_missing_records(
+            self.connection, self.root, self.library_id, self.paths.cache,
+            immediate=True, scan_folders=(),
+        )
+        self.assertEqual(result.deleted_records, 0)
+        self.assertEqual(self.first_video()["id"], video_id)
+        self.assertTrue(self.video_path.is_file())
 
     def test_manual_scan_reads_only_chosen_folders_and_managed_imports(self) -> None:
         (self.root / "other").mkdir()

@@ -4,11 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "videomanager"
-version = "0.1.0"
+version = "0.2.12"
 description = "Offline Windows MP4 library manager"
 requires-python = ">=3.12"
 dependencies = [
     "PySide6>=6.8,<7",
+    "psutil>=6,<8",
     "Send2Trash[nativelib]>=1.8,<3; sys_platform == 'win32'",
 ]
 

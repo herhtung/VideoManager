@@ -60,6 +60,9 @@ class Settings:
     thumbnail_width: int = 180
     scan_folders: tuple[str, ...] = ()
     import_remove_phrases: tuple[str, ...] = ()
+    playback_backend: str = "qt"
+    # Kept only so settings written by 0.2.10 can still be loaded.
+    vlc_video_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.schema_version != 1:
@@ -99,6 +102,13 @@ class Settings:
             if value and value not in phrases:
                 phrases.append(value)
         object.__setattr__(self, "import_remove_phrases", tuple(phrases))
+        if self.playback_backend not in {"qt", "vlc", "mpv"}:
+            raise ValueError("播放器預設值不正確")
+        if not isinstance(self.vlc_video_ids, (list, tuple)) or any(
+            not isinstance(video_id, str) or not video_id for video_id in self.vlc_video_ids
+        ):
+            raise ValueError("播放器偏好格式不正確")
+        object.__setattr__(self, "vlc_video_ids", tuple(dict.fromkeys(self.vlc_video_ids)))
 
 
 def load_settings(path: Path) -> Settings:

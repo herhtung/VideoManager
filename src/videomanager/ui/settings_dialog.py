@@ -2,22 +2,29 @@
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLabel, QPushButton, QSpinBox, QVBoxLayout
+from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QDialogButtonBox,
+                               QFormLayout, QLabel, QPushButton, QScrollArea,
+                               QSpinBox, QVBoxLayout, QWidget)
 
 from videomanager.config import Settings
 from videomanager.ui.import_name_rules import ImportNameRulesEditor
+from videomanager.ui.vlc_backend import find_vlc_directory
+from videomanager.ui.mpv_backend import find_mpv_directory
 
 
 class SettingsDialog(QDialog):
     def __init__(self, settings: Settings, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("設定")
-        self.resize(720, 640)
+        screen = parent.screen() if parent is not None else QApplication.primaryScreen()
+        area = screen.availableGeometry()
+        self.resize(min(720, area.width() - 32), min(640, area.height() - 64))
         self.choose_library_requested = False
         self.reset_library_requested = False
         self.scan_existing_requested = False
         layout = QVBoxLayout(self)
-        form = QFormLayout()
+        content = QWidget()
+        form = QFormLayout(content)
         library_path = QLabel(settings.last_root_path or "尚未設定")
         library_path.setWordWrap(True)
         form.addRow("影片庫根目錄", library_path)
@@ -52,9 +59,24 @@ class SettingsDialog(QDialog):
         form.addRow("縮圖大小", self.size)
         form.addRow("懸停等待", self.hover)
         form.addRow("每張停留", self.interval)
+        playback_note = QLabel("此處決定每次開啟影片時的預設播放器。影片內切換只對當次播放有效。")
+        playback_note.setWordWrap(True)
+        form.addRow("播放器", playback_note)
+        self.playback_backend = QComboBox()
+        for label, key, available in (("Qt（內建）", "qt", True),
+                                      ("VLC（需要已安裝 VLC）", "vlc", find_vlc_directory() is not None),
+                                      ("libmpv（需要可用的 mpv 函式庫）", "mpv", find_mpv_directory() is not None)):
+            self.playback_backend.addItem(label, key)
+            self.playback_backend.model().item(self.playback_backend.count() - 1).setEnabled(available)
+        self.playback_backend.setCurrentIndex(self.playback_backend.findData(settings.playback_backend))
+        form.addRow("預設播放器", self.playback_backend)
         self.remove_phrases = ImportNameRulesEditor(settings.import_remove_phrases)
         form.addRow("匯入檔名清理", self.remove_phrases)
-        layout.addLayout(form)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setWidget(content)
+        layout.addWidget(scroll, 1)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         scan_existing = buttons.addButton("儲存並掃描現有影片…", QDialogButtonBox.ActionRole)
         scan_existing.clicked.connect(self._scan_existing)
@@ -85,4 +107,6 @@ class SettingsDialog(QDialog):
             thumbnail_width=self.size.currentData(),
             scan_folders=previous.scan_folders,
             import_remove_phrases=self.remove_phrases.phrases(),
+            playback_backend=self.playback_backend.currentData(),
+            vlc_video_ids=(),
         )
