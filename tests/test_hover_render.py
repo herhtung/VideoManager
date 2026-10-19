@@ -100,20 +100,48 @@ class HoverRenderTests(unittest.TestCase):
                 self.assertEqual(requested.at(0)[0], "video-1")
                 browser.stop_hover()
                 self.assertEqual(ended.count(), 1)
+                group_row = dict(model.rows[0], _group_cover=True, group_id="group-1",
+                                 group_name="測試組", group_size=2, compressed_count=0)
+                group_row["_group_members"] = [dict(model.rows[0])]
+                model.set_rows([group_row])
+                self.app.processEvents()
+                browser._on_entered(model.index(0))
+                QTest.qWait(80)
+                self.assertEqual(requested.count(), 2)
+                self.assertEqual(requested.at(1)[0], "video-1")
+                browser.stop_hover()
             finally:
                 browser.close()
 
-    def test_related_popup_buttons_open_the_selected_video(self) -> None:
-        popup = RelatedVideosPopup()
-        activated = QSignalSpy(popup.video_activated)
-        popup.show_videos([{"id": "video-2", "display_title": "相似片", "shared_names": "人物甲"}])
-        try:
-            self.assertEqual(popup.content.count(), 1)
-            popup.content.itemAt(0).widget().click()
-            self.assertEqual(activated.count(), 1)
-            self.assertEqual(activated.at(0)[0], "video-2")
-        finally:
-            popup.close()
+    def test_related_popup_has_eight_preview_cards_and_full_results_action(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="vm-related-cards-") as directory:
+            cache = Path(directory)
+            folder = cache / "video-0"
+            folder.mkdir()
+            for number, color in ((0, "#d72020"), (1, "#205ed7")):
+                image = QImage(160, 90, QImage.Format_RGB32)
+                image.fill(QColor(color))
+                self.assertTrue(image.save(str(folder / f"{number:02d}.webp"), "WEBP"))
+            popup = RelatedVideosPopup()
+            activated = QSignalSpy(popup.video_activated)
+            show_all = QSignalSpy(popup.show_all_requested)
+            rows = [{"id": f"video-{n}", "display_title": f"相似片 {n}",
+                     "shared_names": "人物甲"} for n in range(9)]
+            popup.show_videos(rows, cache, "來源影片", "source-id")
+            try:
+                self.assertEqual(popup.content.count(), 8)
+                card = popup.content.itemAt(0).widget()
+                self.assertIn("來源影片", popup.heading.text())
+                self.assertFalse(card.image.pixmap().isNull())
+                card._next_frame()
+                self.assertEqual(card.frame, 1)
+                card.click()
+                self.assertEqual(activated.at(0)[0], "video-0")
+                self.assertFalse(popup.show_all_button.isHidden())
+                popup.show_all_button.click()
+                self.assertEqual(show_all.at(0)[0], "source-id")
+            finally:
+                popup.close()
 
 
 if __name__ == "__main__":

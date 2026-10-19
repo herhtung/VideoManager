@@ -5,11 +5,11 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QCheckBox, QColorDialog, QComboBox, QDialog, QHBoxLayout, QLabel, QLineEdit,
-    QListWidget, QListWidgetItem, QMessageBox,
+    QApplication, QCheckBox, QColorDialog, QComboBox, QDialog, QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
+    QListWidgetItem, QMessageBox, QSizePolicy,
     QPushButton, QScrollArea, QVBoxLayout, QWidget, QGridLayout,
     QTabWidget,
 )
@@ -17,6 +17,75 @@ from PySide6.QtWidgets import (
 from videomanager.ui.notifications import notify_information
 from videomanager.db import repository as repo
 from videomanager.ui.tag_picker import CategoryChooser, TagPicker
+from videomanager.ui.entity_images import choose_entity_thumbnail, thumbnail_icon
+
+
+class EntityButtonList(QScrollArea):
+    """Four equally sized columns of relation buttons."""
+    currentItemChanged = Signal(object, object)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWidgetResizable(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        content = QWidget()
+        self.grid = QGridLayout(content)
+        self.grid.setAlignment(Qt.AlignTop)
+        self.grid.setContentsMargins(6, 6, 6, 6)
+        self.grid.setSpacing(6)
+        for column in range(4):
+            self.grid.setColumnStretch(column, 1)
+        self.setWidget(content)
+        self._items = []
+        self._buttons = []
+        self._current = None
+
+    def add_relation(self, item: QListWidgetItem) -> None:
+        button = QPushButton(item.icon(), item.text())
+        button.setToolTip(item.text())
+        button.setIconSize(QSize(32, 32))
+        button.setMinimumHeight(40)
+        button.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        button.setCheckable(True)
+        button.setStyleSheet("QPushButton { text-align: left; min-height: 32px; } "
+                             "QPushButton:checked { background: #286e69; border-color: #79d9ca; }")
+        button.clicked.connect(lambda: self.setCurrentItem(item))
+        index = len(self._items)
+        self._items.append(item)
+        self._buttons.append(button)
+        self.grid.addWidget(button, index // 4, index % 4)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def item(self, index: int):
+        return self._items[index]
+
+    def currentItem(self):
+        return self._current
+
+    def itemWidget(self, item):
+        return self._buttons[self._items.index(item)]
+
+    def setCurrentRow(self, index: int) -> None:
+        self.setCurrentItem(self.item(index))
+
+    def setCurrentItem(self, item) -> None:
+        previous = self._current
+        self._current = item
+        for candidate, button in zip(self._items, self._buttons):
+            button.setChecked(candidate is item)
+        if item is not previous:
+            self.currentItemChanged.emit(item, previous)
+
+    def clear(self) -> None:
+        self.setCurrentItem(None)
+        while self.grid.count():
+            button = self.grid.takeAt(0).widget()
+            button.hide()
+            button.deleteLater()
+        self._items.clear()
+        self._buttons.clear()
 
 
 class TagTargetDialog(QDialog):
@@ -56,8 +125,12 @@ class MetadataDialog(QDialog):
         self.connection = connection
         self._selected_tag_id: str | None = None
         self.setWindowTitle("管理標籤／關聯")
-        self.resize(1260, 820)
-        self.setMinimumSize(980, 660)
+        screen = parent.screen() if parent is not None else QApplication.primaryScreen()
+        available = screen.availableGeometry() if screen else None
+        width = min(1260, available.width() - 40) if available else 1260
+        height = min(820, available.height() - 60) if available else 820
+        self.resize(max(600, width), max(480, height))
+        self.setMinimumSize(min(760, self.width()), min(520, self.height()))
         outer = QVBoxLayout(self)
         tabs = QTabWidget()
         main = QHBoxLayout()
@@ -169,71 +242,149 @@ class MetadataDialog(QDialog):
     def _entity_management_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.addWidget(QLabel("人物與片商名稱各自管理；刪除名稱會一併移除該名稱的影片關聯。"))
-        self.entity_type = QComboBox()
-        self.entity_type.addItem("人物", "person")
-        self.entity_type.addItem("片商", "studio")
-        self.entity_type.currentIndexChanged.connect(lambda *_: self.refresh_entities())
-        layout.addWidget(self.entity_type)
-        self.entity_list = QListWidget()
-        self.entity_list.currentItemChanged.connect(self._entity_selected)
-        layout.addWidget(self.entity_list, 1)
-        self.entity_name = QLineEdit()
-        self.entity_name.setPlaceholderText("關聯名稱")
-        self.entity_name.returnPressed.connect(self.add_entity)
-        layout.addWidget(self.entity_name)
-        actions = QHBoxLayout()
-        for title, action in (("新增", self.add_entity), ("儲存名稱", self.rename_entity),
-                              ("刪除關聯名稱", self.delete_entity)):
-            button = QPushButton(title)
-            button.clicked.connect(action)
-            actions.addWidget(button)
-        layout.addLayout(actions)
+        layout.addWidget(QLabel("最多三類關聯；越上面的類別，相關影片推薦越優先。"))
+        self.add_relation_type_button = QPushButton("新增關聯類別")
+        self.add_relation_type_button.clicked.connect(self.add_relation_type)
+        layout.addWidget(self.add_relation_type_button)
+        self.entity_sections = QScrollArea()
+        self.entity_sections.setWidgetResizable(True)
+        layout.addWidget(self.entity_sections, 1)
+        self._reload_entity_sections()
         return page
 
+    def _reload_entity_sections(self) -> None:
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        self.entity_lists: dict[str, EntityButtonList] = {}
+        self.entity_names: dict[str, QLineEdit] = {}
+        categories = repo.list_relation_types(self.connection)
+        self.add_relation_type_button.setEnabled(len(categories) < 3)
+        for index, category in enumerate(categories):
+            entity_type, title = category["id"], category["name"]
+            section = QGroupBox(title)
+            section_layout = QVBoxLayout(section)
+            type_actions = QHBoxLayout()
+            type_actions.addStretch()
+            for text, action in (("類別改名", "rename"), ("↑", "up"), ("↓", "down"), ("移除空類別", "remove")):
+                button = QPushButton(text)
+                if action in {"up", "down"}:
+                    button.setFixedWidth(32)
+                    button.setEnabled(index > 0 if action == "up" else index < len(categories) - 1)
+                if action == "remove":
+                    button.setEnabled(len(categories) > 1 and not repo.list_entities(self.connection, entity_type))
+                    button.setToolTip("只有沒有關聯項目的類別可以移除。")
+                button.clicked.connect(lambda _=False, kind=entity_type, operation=action:
+                                       self.change_relation_type(kind, operation))
+                type_actions.addWidget(button)
+            section_layout.addLayout(type_actions)
+            listing = EntityButtonList()
+            listing.setMinimumHeight(100)
+            listing.currentItemChanged.connect(
+                lambda current, _previous, kind=entity_type: self._entity_selected(kind, current))
+            section_layout.addWidget(listing, 1)
+            self.entity_lists[entity_type] = listing
+            name = QLineEdit()
+            name.setPlaceholderText(f"{title}名稱")
+            name.returnPressed.connect(lambda kind=entity_type: self.add_entity(kind))
+            section_layout.addWidget(name)
+            self.entity_names[entity_type] = name
+            actions = QHBoxLayout()
+            for text, action in (("新增", self.add_entity), ("儲存名稱", self.rename_entity),
+                                 ("項目上移", lambda kind: self.move_entity_item(kind, -1)),
+                                 ("項目下移", lambda kind: self.move_entity_item(kind, 1)),
+                                 ("設定小縮圖…", self.set_entity_image),
+                                 ("刪除", self.delete_entity)):
+                button = QPushButton(text)
+                button.clicked.connect(lambda _=False, kind=entity_type, callback=action: callback(kind))
+                actions.addWidget(button)
+            section_layout.addLayout(actions)
+            layout.addWidget(section, 1)
+        self.entity_sections.setWidget(container)
+        self.refresh_entities()
+
+    def add_relation_type(self) -> None:
+        name, ok = QInputDialog.getText(self, "新增關聯類別", "類別名稱（最多三類）")
+        if ok:
+            try:
+                repo.create_relation_type(self.connection, name)
+                self._reload_entity_sections()
+            except (sqlite3.Error, ValueError) as exc:
+                QMessageBox.warning(self, "無法新增類別", str(exc))
+
+    def change_relation_type(self, kind: str, action: str) -> None:
+        try:
+            if action == "rename":
+                category = next(row for row in repo.list_relation_types(self.connection) if row["id"] == kind)
+                name, ok = QInputDialog.getText(self, "關聯類別改名", "類別名稱", text=category["name"])
+                if not ok:
+                    return
+                repo.rename_relation_type(self.connection, kind, name)
+            elif action == "remove":
+                repo.delete_relation_type(self.connection, kind)
+            else:
+                repo.move_relation_type(self.connection, kind, -1 if action == "up" else 1)
+            self._reload_entity_sections()
+        except (sqlite3.Error, ValueError) as exc:
+            QMessageBox.warning(self, "無法修改類別", str(exc))
+
     def refresh_entities(self, preferred: str | None = None) -> None:
-        if not hasattr(self, "entity_list"):
+        if not hasattr(self, "entity_lists"):
             return
-        wanted = preferred or (self.entity_list.currentItem().data(Qt.UserRole)
-                               if self.entity_list.currentItem() else None)
-        self.entity_list.clear()
-        rows = repo.list_entities(self.connection, self.entity_type.currentData())
-        for row in rows:
-            item = QListWidgetItem(row["name"])
-            item.setData(Qt.UserRole, row["id"])
-            self.entity_list.addItem(item)
-            if row["id"] == wanted:
-                self.entity_list.setCurrentItem(item)
-        if self.entity_list.currentItem() is None and self.entity_list.count():
-            self.entity_list.setCurrentRow(0)
-        if self.entity_list.currentItem() is None:
-            self.entity_name.clear()
+        for entity_type, listing in self.entity_lists.items():
+            current = listing.currentItem()
+            wanted = preferred or (current.data(Qt.UserRole) if current else None)
+            listing.clear()
+            for row in repo.list_entities(self.connection, entity_type):
+                item = QListWidgetItem(row["name"])
+                item.setIcon(thumbnail_icon(row["thumbnail_png"]))
+                item.setData(Qt.UserRole, row["id"])
+                listing.add_relation(item)
+                if row["id"] == wanted:
+                    listing.setCurrentItem(item)
+            if listing.currentItem() is None and listing.count():
+                listing.setCurrentRow(0)
+            if listing.currentItem() is None:
+                self.entity_names[entity_type].clear()
 
-    def _entity_selected(self, current, _previous=None) -> None:
-        self.entity_name.setText(current.text() if current else "")
+    def _entity_selected(self, entity_type: str, current) -> None:
+        self.entity_names[entity_type].setText(current.text() if current else "")
 
-    def add_entity(self) -> None:
-        name = self.entity_name.text().strip()
+    def set_entity_image(self, entity_type: str) -> None:
+        item = self.entity_lists[entity_type].currentItem()
+        if item and choose_entity_thumbnail(self, self.connection, item.data(Qt.UserRole)):
+            self.refresh_entities(item.data(Qt.UserRole))
+
+    def move_entity_item(self, kind: str, step: int) -> None:
+        item = self.entity_lists[kind].currentItem()
+        if item is not None:
+            try:
+                repo.move_entity(self.connection, item.data(Qt.UserRole), step)
+                self.refresh_entities(item.data(Qt.UserRole))
+            except (sqlite3.Error, ValueError) as exc:
+                QMessageBox.warning(self, "移動關聯項目失敗", str(exc))
+
+    def add_entity(self, entity_type: str) -> None:
+        name = self.entity_names[entity_type].text().strip()
         if not name:
             return
         try:
-            identifier = repo.create_entity(self.connection, self.entity_type.currentData(), name)
+            identifier = repo.create_entity(self.connection, entity_type, name)
             self.refresh_entities(identifier)
         except (sqlite3.Error, ValueError) as exc:
             QMessageBox.critical(self, "新增關聯失敗", str(exc))
 
-    def rename_entity(self) -> None:
-        item = self.entity_list.currentItem()
+    def rename_entity(self, entity_type: str) -> None:
+        item = self.entity_lists[entity_type].currentItem()
         if not item:
             return
         try:
-            repo.rename_entity(self.connection, item.data(Qt.UserRole), self.entity_name.text())
+            repo.rename_entity(self.connection, item.data(Qt.UserRole), self.entity_names[entity_type].text())
             self.refresh_entities(item.data(Qt.UserRole))
         except (sqlite3.Error, ValueError) as exc:
             QMessageBox.critical(self, "修改名稱失敗", str(exc))
 
-    def delete_entity(self) -> None:
-        item = self.entity_list.currentItem()
+    def delete_entity(self, entity_type: str) -> None:
+        item = self.entity_lists[entity_type].currentItem()
         if not item:
             return
         linked = self.connection.execute("SELECT COUNT(*) FROM video_entities WHERE entity_id=?",
@@ -247,7 +398,7 @@ class MetadataDialog(QDialog):
             return
         try:
             repo.delete_entity(self.connection, item.data(Qt.UserRole))
-            self.entity_name.clear()
+            self.entity_names[entity_type].clear()
             self.refresh_entities()
         except (sqlite3.Error, ValueError) as exc:
             QMessageBox.critical(self, "刪除關聯失敗", str(exc))

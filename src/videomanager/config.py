@@ -57,15 +57,23 @@ class Settings:
     preview_policy: str = "auto"
     hover_delay_ms: int = 400
     related_hover_delay_ms: int = 2000
+    related_popup_enabled: bool = True
     frame_interval_ms: int = 500
     thumbnail_width: int = 180
     scan_folders: tuple[str, ...] = ()
     import_remove_phrases: tuple[str, ...] = ()
     playback_backend: str = "qt"
+    nav_sidebar_width: int = 0
+    details_sidebar_width: int = 0
     # Kept only so settings written by 0.2.10 can still be loaded.
     vlc_video_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        if not isinstance(self.related_popup_enabled, bool):
+            raise ValueError("浮動影片詳情開關不正確")
+        for width in (self.nav_sidebar_width, self.details_sidebar_width):
+            if not isinstance(width, int) or not 0 <= width <= 10000:
+                raise ValueError("側邊欄寬度不正確")
         if self.schema_version != 1:
             raise ValueError("Unsupported settings version")
         if (self.library_id is None) != (self.last_root_path is None):

@@ -6,11 +6,11 @@ import sqlite3
 from html import escape
 from pathlib import Path
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-    QPushButton, QTextEdit,
-    QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
+    QPushButton, QSizePolicy,
+    QSplitter, QVBoxLayout, QWidget,
 )
 
 from videomanager.db import repository as repo
@@ -28,7 +28,7 @@ class StarRating(QWidget):
         self.buttons = []
         for number in range(1, 6):
             button = QPushButton("☆")
-            button.setFixedSize(34, 34)
+            button.setFixedSize(26, 26)
             button.setToolTip(f"{number} 顆星；再按一次可清除評分")
             button.setAccessibleName(f"評 {number} 顆星")
             button.clicked.connect(lambda _=False, n=number: self.setValue(0 if self._value == n else n))
@@ -47,7 +47,7 @@ class StarRating(QWidget):
             button.setText("★" if selected else "☆")
             button.setStyleSheet(
                 "QPushButton { color: " + ("#ffc35a" if selected else "#8799a5") +
-                "; font-size: 24px; background: transparent; border: 0; padding: 0; }"
+                "; font-size: 20px; background: transparent; border: 0; padding: 0; }"
                 "QPushButton:hover { color: #ffd47b; }"
             )
 
@@ -67,17 +67,14 @@ class DetailsPanel(QWidget):
         self.group_id: str | None = None
         self.batch_ids: list[str] = []
         self._saved_state: tuple | None = None
+        self.completed_identity = (None, None)
         self.title = QLineEdit()
         self.title_label = QLabel("顯示名稱")
         self.rating = StarRating()
         self.favorite = QCheckBox("收藏")
-        self.recorded = QLineEdit()
-        self.recorded.setPlaceholderText("YYYY-MM-DD（可留空）")
-        self.notes = QTextEdit()
-        self.notes.setMaximumHeight(100)
         self.tags = TagPicker(connection)
-        self.people = EntityPicker(connection, "person")
-        self.studios = EntityPicker(connection, "studio")
+        self.entity_pickers: dict[str, EntityPicker] = {}
+        self._relation_signature = None
         self.batch_operation = QComboBox()
         self.batch_operation.addItems(["批次新增關聯", "批次移除關聯"])
         self.batch_operation.hide()
@@ -87,17 +84,28 @@ class DetailsPanel(QWidget):
         self.entity_summary = QLabel("人物／片商：無")
         self.entity_summary.setOpenExternalLinks(False)
         self.entity_summary.linkActivated.connect(self._entity_link_activated)
-        self.people.selectionChanged.connect(self._refresh_entity_summary)
-        self.studios.selectionChanged.connect(self._refresh_entity_summary)
 
         layout = QVBoxLayout(self)
-        form = QFormLayout()
-        form.addRow(self.title_label, self.title)
-        form.addRow("評分", self.rating)
-        form.addRow("", self.favorite)
-        form.addRow("拍攝日期", self.recorded)
-        form.addRow("備註", self.notes)
-        layout.addLayout(form)
+        self.columns_splitter = QSplitter(Qt.Horizontal)
+        columns = self.columns_splitter
+        columns.setChildrenCollapsible(False)
+        columns.setHandleWidth(6)
+        columns.setStyleSheet("QSplitter::handle { background: #2b424c; } "
+                             "QSplitter::handle:hover { background: #79d9ca; }")
+        left = QWidget()
+        left.setMinimumWidth(150)
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        right = QWidget()
+        right.setMinimumWidth(125)
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(7)
+        left_layout.addWidget(self.title_label)
+        left_layout.addWidget(self.title)
+        left_layout.addWidget(QLabel("評分"))
+        left_layout.addWidget(self.rating)
+        left_layout.addWidget(self.favorite)
         tag_header = QHBoxLayout()
         tag_header.addWidget(QLabel("標籤"))
         tag_header.addStretch()
@@ -106,22 +114,23 @@ class DetailsPanel(QWidget):
         add_tag.setFixedWidth(38)
         add_tag.clicked.connect(self.quick_add_tag)
         tag_header.addWidget(add_tag)
-        layout.addLayout(tag_header)
-        layout.addWidget(self.tags, 1)
-        relation_row = QHBoxLayout()
-        for title, picker in (("人物", self.people), ("片商", self.studios)):
-            column = QVBoxLayout()
-            column.setContentsMargins(0, 0, 0, 0)
-            column.addWidget(QLabel(title))
-            column.addWidget(picker)
-            relation_row.addLayout(column, 1)
-        layout.addLayout(relation_row)
+        right_layout.addLayout(tag_header)
+        right_layout.addWidget(self.tags, 1)
+        self.relations_box = QWidget()
+        self.relations_layout = QVBoxLayout(self.relations_box)
+        self.relations_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.addWidget(self.relations_box, 1)
+        self._reload_relation_pickers()
+        columns.addWidget(left)
+        columns.addWidget(right)
+        columns.setSizes([260, 260])
+        layout.addWidget(columns, 1)
         layout.addWidget(self.batch_operation)
         status_row = QHBoxLayout()
         status_row.addWidget(self.status)
         status_row.addStretch()
         self.return_button = QPushButton("退回待整理")
-        self.return_button.setToolTip("保留目前的名稱、標籤、評分與備註，只把狀態改回待整理。")
+        self.return_button.setToolTip("保留目前的名稱、標籤與評分，只把狀態改回待整理。")
         self.return_button.clicked.connect(self.return_to_unprocessed)
         self.return_button.hide()
         status_row.addWidget(self.return_button)
@@ -148,30 +157,64 @@ class DetailsPanel(QWidget):
         elif self.video_id:
             self.set_video(self.video_id)
 
+    def _reload_relation_pickers(self) -> None:
+        categories = repo.list_relation_types(self.connection)
+        signature = tuple((row["id"], row["name"]) for row in categories)
+        if signature == self._relation_signature:
+            return
+        selected = {key: picker.selected_ids() for key, picker in self.entity_pickers.items()}
+        while self.relations_layout.count():
+            widget = self.relations_layout.takeAt(0).widget()
+            widget.hide()
+            widget.deleteLater()
+        self.entity_pickers = {}
+        for row in categories:
+            section = QWidget()
+            section.setSizePolicy(section.sizePolicy().horizontalPolicy(), QSizePolicy.Ignored)
+            layout = QVBoxLayout(section)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(4)
+            heading = QLabel(row["name"])
+            heading.setToolTip(row["name"])
+            layout.addWidget(heading)
+            picker = EntityPicker(self.connection, row["id"])
+            picker.scroll.setMinimumHeight(0)
+            picker.scroll.setMaximumHeight(16777215)
+            picker.set_selected(selected.get(row["id"], set()))
+            picker.selectionChanged.connect(self._refresh_entity_summary)
+            layout.addWidget(picker, 1)
+            self.relations_layout.addWidget(section, 1)
+            self.entity_pickers[row["id"]] = picker
+        # Retain the original accessors for existing integrations.
+        self.people = self.entity_pickers.get("person")
+        self.studios = self.entity_pickers.get("studio")
+        self._relation_signature = signature
+
+    def _selected_entities(self) -> set[str]:
+        return set().union(*(picker.selected_ids() for picker in self.entity_pickers.values()))
+
     def set_video(self, video_id: str | None) -> None:
+        self._reload_relation_pickers()
         self.batch_operation.hide()
         self.batch_ids = []
         self.group_id = None
         self.video_id = video_id
         self.title_label.setText("顯示名稱")
-        for widget in (self.title, self.rating, self.favorite, self.recorded, self.notes,
+        for widget in (self.title, self.rating, self.favorite,
                        self.done_button, self.skip_button):
             widget.setEnabled(True)
         self.save_button.setText("儲存")
         enabled = video_id is not None
         self.setEnabled(enabled)
         self.tags.connection = self.connection
-        self.people.connection = self.connection
-        self.studios.connection = self.connection
         self.tags.set_selected(set())
-        self.people.set_selected(set())
-        self.studios.set_selected(set())
+        for picker in self.entity_pickers.values():
+            picker.connection = self.connection
+            picker.set_selected(set())
         if video_id is None:
             self.title.clear()
             self.rating.setValue(0)
             self.favorite.setChecked(False)
-            self.recorded.clear()
-            self.notes.clear()
             self.status.setText("尚未選擇影片")
             self.return_button.hide()
             self.file_info.clear()
@@ -185,17 +228,14 @@ class DetailsPanel(QWidget):
         self.title.setText(row["display_title"])
         self.rating.setValue(row["rating"] or 0)
         self.favorite.setChecked(bool(row["is_favorite"]))
-        self.recorded.setText(row["recorded_at"] or "")
-        self.notes.setPlainText(row["notes"] or "")
         self.status.setText("已整理" if row["status"] == "done" else "待整理")
         self.return_button.setVisible(row["status"] == "done")
         self.file_info.setText(f"{row['relative_path']}\n{row['width'] or '?'} × {row['height'] or '?'} · {row['video_codec'] or '?'}")
         self.tags.set_selected(repo.video_tag_ids(self.connection, video_id))
         self.tags.reload()
-        self.people.set_selected(repo.video_entity_ids(self.connection, video_id, "person"))
-        self.people.reload()
-        self.studios.set_selected(repo.video_entity_ids(self.connection, video_id, "studio"))
-        self.studios.reload()
+        for kind, picker in self.entity_pickers.items():
+            picker.set_selected(repo.video_entity_ids(self.connection, video_id, kind))
+            picker.reload()
         self._refresh_entity_summary()
         self._capture_state()
 
@@ -206,12 +246,12 @@ class DetailsPanel(QWidget):
         self.setEnabled(True)
         self.title_label.setText("批次標籤")
         self.title.setText(f"已選 {len(self.batch_ids)} 部影片")
-        for widget in (self.title, self.rating, self.favorite, self.recorded, self.notes,
+        for widget in (self.title, self.rating, self.favorite,
                        self.done_button, self.skip_button):
             widget.setEnabled(False)
         self.tags.set_selected(set())
-        self.people.set_selected(set())
-        self.studios.set_selected(set())
+        for picker in self.entity_pickers.values():
+            picker.set_selected(set())
         self.batch_operation.show()
         self.tags.reload()
         self.status.setText("批次新增／移除關聯")
@@ -232,40 +272,36 @@ class DetailsPanel(QWidget):
         self.title_label.setText("影片組名稱")
         self.title.setText(group["name"])
         self.status.setText(f"影片組 · {len(members)} 段 · {self.status.text()}")
-        self.file_info.setText(f"共 {len(members)} 段 MP4；標籤、評分、收藏、日期、備註與整理狀態由整組共用。")
+        self.file_info.setText(f"共 {len(members)} 段 MP4；標籤、評分、收藏與整理狀態由整組共用。")
         shared_tags = set().union(*(repo.video_tag_ids(self.connection, part) for part in members))
         self.tags.set_selected(shared_tags)
         self.tags.reload()
-        shared_people = set.intersection(*(repo.video_entity_ids(self.connection, part, "person") for part in members))
-        shared_studios = set.intersection(*(repo.video_entity_ids(self.connection, part, "studio") for part in members))
-        self.people.set_selected(shared_people)
-        self.people.reload()
-        self.studios.set_selected(shared_studios)
-        self.studios.reload()
+        for kind, picker in self.entity_pickers.items():
+            picker.set_selected(set.intersection(*(repo.video_entity_ids(self.connection, part, kind) for part in members)))
+            picker.reload()
         self._refresh_entity_summary()
         self._capture_state()
 
     def _refresh_entity_summary(self) -> None:
         links = []
-        for picker, entity_type, label in ((self.people, "person", "人物"), (self.studios, "studio", "片商")):
+        for entity_type, picker in self.entity_pickers.items():
             selected = picker.selected_ids()
             if not selected:
                 continue
             names = {row["id"]: row["name"] for row in repo.list_entities(self.connection, entity_type)}
             links.extend(f'<a href="{entity_type}:{identifier}">{escape(names[identifier])}</a>'
                          for identifier in sorted(selected) if identifier in names)
-        self.entity_summary.setText("人物／片商：" + ("、".join(links) if links else "無") + "（點名稱查看相關影片）")
+        self.entity_summary.setText("關聯：" + ("、".join(links) if links else "無") + "（點名稱查看相關影片）")
 
     def _entity_link_activated(self, url: str) -> None:
         entity_type, separator, identifier = url.partition(":")
-        if separator and entity_type in {"person", "studio"}:
+        if separator and entity_type in self.entity_pickers:
             self.entity_requested.emit(entity_type, identifier)
 
     def _form_state(self) -> tuple:
         return (self.video_id, self.group_id, tuple(self.batch_ids), self.title.text(), self.rating.value(),
-                self.favorite.isChecked(), self.recorded.text(), self.notes.toPlainText(),
-                frozenset(self.tags.selected_ids()), frozenset(self.people.selected_ids()),
-                frozenset(self.studios.selected_ids()), self.batch_operation.currentIndex())
+                self.favorite.isChecked(),
+                frozenset(self.tags.selected_ids()), frozenset(self._selected_entities()), self.batch_operation.currentIndex())
 
     def _capture_state(self) -> None:
         self._saved_state = self._form_state()
@@ -298,7 +334,7 @@ class DetailsPanel(QWidget):
             with self.connection:
                 for table, id_column, selected in (
                     ("video_tags", "tag_id", self.tags.selected_ids()),
-                    ("video_entities", "entity_id", self.people.selected_ids() | self.studios.selected_ids()),
+                    ("video_entities", "entity_id", self._selected_entities()),
                 ):
                     verb = "INSERT OR IGNORE INTO" if self.batch_operation.currentIndex() == 0 else "DELETE FROM"
                     if self.batch_operation.currentIndex() == 0:
@@ -342,21 +378,22 @@ class DetailsPanel(QWidget):
         try:
             repo.save_video_details(
                 self.connection, self.video_id, title=title,
-                notes=self.notes.toPlainText(),
+                notes=row["notes"] or "",
                 rating=self.rating.value(),
                 is_favorite=self.favorite.isChecked(),
-                recorded_at=self.recorded.text().strip() or None,
+                recorded_at=row["recorded_at"],
                 status=status,
                 tag_ids=self.tags.selected_ids(),
                 group_cover=self.group_id is not None,
-                entity_ids=self.people.selected_ids() | self.studios.selected_ids(),
+                entity_ids=self._selected_entities(),
+                preserve_hidden_fields=True,
             )
         except (sqlite3.Error, ValueError, OSError) as exc:
             QMessageBox.critical(self, "儲存失敗", str(exc))
             return False
         if self.group_id:
             count = len(repo.group_member_ids(self.connection, self.group_id))
-            self.file_info.setText(f"共 {count} 段 MP4；標籤、評分、收藏、日期、備註與整理狀態由整組共用。")
+            self.file_info.setText(f"共 {count} 段 MP4；標籤、評分、收藏與整理狀態由整組共用。")
         else:
             self.file_info.setText(f"{repo.video_by_id(self.connection, self.video_id)['relative_path']}\n"
                                    f"{row['width'] or '?'} × {row['height'] or '?'} · {row['video_codec'] or '?'}")
@@ -371,5 +408,7 @@ class DetailsPanel(QWidget):
         self.save_current(return_to_queue=True)
 
     def finish_current(self) -> None:
+        identity = (self.video_id, self.group_id)
         if self.save_current(complete=True):
+            self.completed_identity = identity
             self.completed.emit()

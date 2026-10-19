@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QDialogButtonBox,
-                               QFormLayout, QLabel, QPushButton, QScrollArea,
+from dataclasses import replace
+
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+                               QFormLayout, QGroupBox, QLabel, QPushButton, QScrollArea,
                                QDoubleSpinBox, QSpinBox, QVBoxLayout, QWidget)
 
 from videomanager.config import Settings
@@ -24,7 +26,24 @@ class SettingsDialog(QDialog):
         self.scan_existing_requested = False
         layout = QVBoxLayout(self)
         content = QWidget()
-        form = QFormLayout(content)
+        sections = QVBoxLayout(content)
+        sections.setContentsMargins(0, 0, 6, 0)
+        sections.setSpacing(14)
+
+        def section(title):
+            group = QGroupBox(title)
+            group.setStyleSheet("QGroupBox { border: 1px solid #30434e; border-radius: 7px; "
+                               "margin-top: 12px; padding: 12px 10px 8px; } "
+                               "QGroupBox::title { subcontrol-origin: margin; left: 12px; "
+                               "padding: 0 5px; color: #79d9ca; }")
+            form = QFormLayout(group)
+            form.setVerticalSpacing(10)
+            form.setRowWrapPolicy(QFormLayout.WrapLongRows)
+            form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+            sections.addWidget(group)
+            return form
+
+        form = section("影片庫位置")
         library_path = QLabel(settings.last_root_path or "尚未設定")
         library_path.setWordWrap(True)
         form.addRow("影片庫根目錄", library_path)
@@ -60,14 +79,22 @@ class SettingsDialog(QDialog):
         for label, width in (("小", 140), ("中", 180), ("大", 240)):
             self.size.addItem(label, width)
         self.size.setCurrentIndex(self.size.findData(settings.thumbnail_width))
+        form = section("縮圖與預覽")
         form.addRow("預覽模式", self.mode)
         form.addRow("縮圖大小", self.size)
         form.addRow("懸停等待", self.hover)
-        form.addRow("相似影片浮欄延遲", self.related_hover)
         form.addRow("每張停留", self.interval)
+        form = section("浮動影片詳情")
+        self.related_popup_enabled = QCheckBox("滑鼠停在影片上時顯示詳情")
+        self.related_popup_enabled.setChecked(settings.related_popup_enabled)
+        self.related_hover.setEnabled(settings.related_popup_enabled)
+        self.related_popup_enabled.toggled.connect(self.related_hover.setEnabled)
+        form.addRow(self.related_popup_enabled)
+        form.addRow("顯示前等待", self.related_hover)
+        form = section("影片播放")
         playback_note = QLabel("此處決定每次開啟影片時的預設播放器。影片內切換只對當次播放有效。")
         playback_note.setWordWrap(True)
-        form.addRow("播放器", playback_note)
+        form.addRow(playback_note)
         self.playback_backend = QComboBox()
         for label, key, available in (("Qt（內建）", "qt", True),
                                       ("VLC（需要已安裝 VLC）", "vlc", find_vlc_directory() is not None),
@@ -76,14 +103,18 @@ class SettingsDialog(QDialog):
             self.playback_backend.model().item(self.playback_backend.count() - 1).setEnabled(available)
         self.playback_backend.setCurrentIndex(self.playback_backend.findData(settings.playback_backend))
         form.addRow("預設播放器", self.playback_backend)
+        form = section("匯入與檔名清理")
         self.remove_phrases = ImportNameRulesEditor(settings.import_remove_phrases)
-        form.addRow("匯入檔名清理", self.remove_phrases)
+        form.addRow(self.remove_phrases)
+        sections.addStretch()
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.NoFrame)
         scroll.setWidget(content)
         layout.addWidget(scroll, 1)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("儲存")
+        buttons.button(QDialogButtonBox.Cancel).setText("取消")
         scan_existing = buttons.addButton("儲存並掃描現有影片…", QDialogButtonBox.ActionRole)
         scan_existing.clicked.connect(self._scan_existing)
         buttons.accepted.connect(self.accept)
@@ -103,17 +134,19 @@ class SettingsDialog(QDialog):
         self.accept()
 
     def updated(self, previous: Settings) -> Settings:
-        return Settings(
-            library_id=previous.library_id,
-            last_root_path=previous.last_root_path,
+        return replace(
+            previous,
             preview_mode=self.mode.currentData(),
             preview_policy=previous.preview_policy,
             hover_delay_ms=self.hover.value(),
             related_hover_delay_ms=round(self.related_hover.value() * 1000),
+            related_popup_enabled=self.related_popup_enabled.isChecked(),
             frame_interval_ms=self.interval.value(),
             thumbnail_width=self.size.currentData(),
             scan_folders=previous.scan_folders,
             import_remove_phrases=self.remove_phrases.phrases(),
             playback_backend=self.playback_backend.currentData(),
+            nav_sidebar_width=previous.nav_sidebar_width,
+            details_sidebar_width=previous.details_sidebar_width,
             vlc_video_ids=(),
         )

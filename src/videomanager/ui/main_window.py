@@ -10,7 +10,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QItemSelectionModel, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QItemSelectionModel, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QComboBox, QDialog, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
     QListView, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QProgressBar, QProgressDialog, QPushButton,
@@ -111,6 +111,9 @@ class MainWindow(QMainWindow):
         self._group_return_filters: tuple[str, dict] | None = None
         self.player: PlayerView | None = None
         self._related_popup: RelatedVideosPopup | None = None
+        self._sidebar_changing = False
+        self._navigation_collapsed = False
+        self._details_collapsed = False
         self.compression_center: CompressionCenter | None = None
         self.edit_center: CompressionCenter | None = None
         self._player_return_widget: QWidget | None = None
@@ -204,7 +207,7 @@ class MainWindow(QMainWindow):
         self._action(library, "壓縮中心", self.open_compression_center)
         edit = self.menuBar().addMenu("編輯")
         for label, callback in (
-            ("管理標籤…", self.manage_metadata), ("批次加／移除標籤…", self.batch_relations),
+            ("管理標籤／關聯…", self.manage_metadata), ("批次加／移除標籤與關聯…", self.batch_relations),
             ("改名或移動影片…", self.move_selected), ("重新產生所選影格", self.retry_selected),
             ("將所選影片建立為一組…", self.group_selected),
             ("將所選影片退回待整理", self.return_selected_to_unprocessed),
@@ -229,24 +232,36 @@ class MainWindow(QMainWindow):
         shell_layout.setContentsMargins(0, 0, 0, 0)
         shell_layout.setSpacing(0)
         splitter = QSplitter(Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
         nav_panel = QWidget()
         nav_layout = QVBoxLayout(nav_panel)
-        nav_layout.setContentsMargins(8, 8, 8, 7)
+        nav_layout.setContentsMargins(5, 8, 5, 7)
         nav_layout.setSpacing(4)
+        self.nav_splitter = splitter
+        self.nav_panel = nav_panel
+        self.nav_toggle = QPushButton("☰")
+        self.nav_toggle.setToolTip("展開影片庫導覽")
+        self.nav_toggle.setAccessibleName("展開或收合影片庫導覽")
+        self.nav_toggle.clicked.connect(self.toggle_navigation)
+        nav_layout.addWidget(self.nav_toggle)
+        self.nav_content = QWidget()
+        content_layout = QVBoxLayout(self.nav_content)
+        content_layout.setContentsMargins(3, 0, 3, 0)
+        content_layout.setSpacing(4)
         nav_title = QLabel("瀏覽影片庫")
         nav_title.setObjectName("sectionLabel")
-        nav_layout.addWidget(nav_title)
+        content_layout.addWidget(nav_title)
         self.navigation = QListWidget()
         self.navigation.currentItemChanged.connect(self._navigation_changed)
-        nav_layout.addWidget(self.navigation, 1)
+        content_layout.addWidget(self.navigation, 1)
         tools_label = QLabel("常用整理")
         tools_label.setObjectName("sectionLabel")
-        nav_layout.addWidget(tools_label)
+        content_layout.addWidget(tools_label)
         for label, callback in (
             ("剪輯中心", self.open_edit_center),
             ("壓縮中心", self.open_compression_center),
-            ("管理標籤", self.manage_metadata),
-            ("批次加／移除標籤", self.batch_relations),
+            ("管理標籤／關聯", self.manage_metadata),
+            ("批次加／移除標籤與關聯", self.batch_relations),
             ("將選取影片建立為一組", self.group_selected),
             ("影片回收桶", self.show_trash_page),
             ("設定", self.show_settings),
@@ -254,17 +269,19 @@ class MainWindow(QMainWindow):
             button = QPushButton(label)
             button.setObjectName("navAction")
             button.clicked.connect(callback)
-            nav_layout.addWidget(button)
-        nav_panel.setMinimumWidth(150)
-        nav_panel.setMaximumWidth(235)
+            content_layout.addWidget(button)
+        nav_layout.addWidget(self.nav_content, 1)
+        nav_panel.setMinimumWidth(42)
+        nav_panel.setMaximumWidth(400)
         splitter.addWidget(nav_panel)
         center = QWidget()
+        center.setMinimumWidth(240)
         center_layout = QVBoxLayout(center)
         center_layout.setContentsMargins(16, 14, 16, 12)
         center_layout.setSpacing(10)
         toolbar = QHBoxLayout()
         self.search = QLineEdit()
-        self.search.setPlaceholderText("搜尋顯示名稱、檔名、備註")
+        self.search.setPlaceholderText("搜尋顯示名稱、檔名")
         self.search.setClearButtonEnabled(True)
         self.search.returnPressed.connect(self.refresh_videos)
         self.search.textChanged.connect(lambda text: self.refresh_videos() if not text else None)
@@ -290,6 +307,7 @@ class MainWindow(QMainWindow):
         view_more_menu = QMenu(self.view_more_button)
         view_more_menu.addAction("統計", self.show_statistics)
         view_more_menu.addAction("切換清單／網格", self.toggle_list)
+        view_more_menu.addAction("清除條件", self.clear_filters)
         self.view_more_button.setMenu(view_more_menu)
         self.view_more_button.hide()
         scan_button = QPushButton("掃描")
@@ -303,6 +321,9 @@ class MainWindow(QMainWindow):
         actions_more_menu.addAction("重新掃描", self.start_scan)
         actions_more_menu.addAction("繼續／暫停縮圖載入", self.toggle_previews)
         actions_more_menu.addAction("壓縮所選", self.compress_selected)
+        actions_more_menu.addAction("匯入資料夾", self.import_folder)
+        self.recycle_more_action = actions_more_menu.addAction("刪除選取", self.recycle_selected)
+        self.recycle_more_action.setEnabled(False)
         self.actions_more_button.setMenu(actions_more_menu)
         self.actions_more_button.hide()
         self.import_modes = QButtonGroup(self)
@@ -434,13 +455,28 @@ class MainWindow(QMainWindow):
         self.details = DetailsPanel(self.connection)
         self.details.entity_requested.connect(self.filter_by_entity)
         self.details.set_library(self.root, self.library_id)
-        self.details.setMinimumWidth(220)
         self.details.set_video(None)
         self.details.saved.connect(self.after_metadata_saved)
         self.details.completed.connect(self.advance_after_complete)
         self.details.skipped.connect(self.select_next)
-        splitter.addWidget(self.details)
-        splitter.setSizes([190, 880, 310])
+        self.details_panel = QWidget()
+        self.details_panel.setMinimumWidth(42)
+        details_layout = QVBoxLayout(self.details_panel)
+        details_layout.setContentsMargins(5, 8, 5, 7)
+        details_layout.setSpacing(4)
+        self.details_toggle = QPushButton("›")
+        self.details_toggle.setAccessibleName("展開或收合影片資料")
+        self.details_toggle.clicked.connect(self.toggle_details)
+        details_layout.addWidget(self.details_toggle)
+        details_layout.addWidget(self.details, 1)
+        splitter.addWidget(self.details_panel)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(2, 0)
+        splitter.setSizes([190, 900, 500])
+        self._set_navigation_collapsed(True)
+        splitter.splitterMoved.connect(self._sidebar_moved)
+        QTimer.singleShot(0, self._restore_sidebar_layout)
         self.main_stack = QStackedWidget()
         self.browser_page = splitter
         self.main_stack.addWidget(splitter)
@@ -505,10 +541,89 @@ class MainWindow(QMainWindow):
         self.statistics_button.setVisible(not compact)
         self.view_button.setVisible(not compact)
         self.view_more_button.setVisible(compact)
+        self.clear_filter_button.setVisible(not compact)
         self.scan_button.setVisible(not compact)
         self.preview_button.setVisible(not compact)
         self.compress_button.setVisible(not compact)
+        self.import_folder_button.setVisible(not compact)
+        self.recycle_button.setVisible(not compact)
         self.actions_more_button.setVisible(compact)
+
+    def toggle_navigation(self) -> None:
+        collapsed = not self._navigation_collapsed
+        if collapsed:
+            self._remember_sidebar_width(0, self.nav_splitter.sizes()[0])
+        self._set_navigation_collapsed(collapsed)
+
+    def _set_navigation_collapsed(self, collapsed: bool) -> None:
+        self._navigation_collapsed = collapsed
+        self.nav_panel.setMinimumWidth(42 if collapsed else 150)
+        self.nav_splitter.setCollapsible(0, not collapsed)
+        self.nav_content.setVisible(not collapsed)
+        self.nav_toggle.setText("☰" if collapsed else "‹")
+        self.nav_toggle.setToolTip("展開影片庫導覽" if collapsed else "收合影片庫導覽")
+        self._resize_sidebar(0, 42 if collapsed else self._sidebar_open_width(0))
+
+    def toggle_details(self) -> None:
+        collapsed = not self._details_collapsed
+        if collapsed:
+            self._remember_sidebar_width(2, self.nav_splitter.sizes()[2])
+        self._set_details_collapsed(collapsed)
+
+    def _set_details_collapsed(self, collapsed: bool) -> None:
+        self._details_collapsed = collapsed
+        self.details_panel.setMinimumWidth(42 if collapsed else 335)
+        self.nav_splitter.setCollapsible(2, not collapsed)
+        self.details.setVisible(not collapsed)
+        self.details_toggle.setText("☰" if collapsed else "›")
+        self.details_toggle.setToolTip("展開影片資料" if collapsed else "收合影片資料")
+        self._resize_sidebar(2, 42 if collapsed else self._sidebar_open_width(2))
+
+    def _remember_sidebar_width(self, index: int, width: int) -> None:
+        key = "nav_sidebar_width" if index == 0 else "details_sidebar_width"
+        self.settings = replace(self.settings, **{key: width})
+        save_settings(self.paths.settings, self.settings)
+
+    def _sidebar_open_width(self, index: int) -> int:
+        remembered = (self.settings.nav_sidebar_width if index == 0
+                      else self.settings.details_sidebar_width)
+        total = sum(self.nav_splitter.sizes())
+        default = max(150, round(total * .12)) if index == 0 else max(335, round(total * .32))
+        return remembered or default
+
+    def _resize_sidebar(self, index: int, width: int) -> None:
+        sizes = self.nav_splitter.sizes()
+        if len(sizes) != 3:
+            return
+        total = sum(sizes)
+        other = sizes[2 if index == 0 else 0]
+        width = max(42, min(width, max(42, total - other - 240)))
+        sizes[index] = width
+        sizes[1] = max(0, total - other - width)
+        self._sidebar_changing = True
+        try:
+            self.nav_splitter.setSizes(sizes)
+        finally:
+            self._sidebar_changing = False
+
+    def _restore_sidebar_layout(self) -> None:
+        self._set_details_collapsed(self._details_collapsed)
+        self._set_navigation_collapsed(self._navigation_collapsed)
+
+    def _sidebar_moved(self, _position: int, handle: int) -> None:
+        if self._sidebar_changing:
+            return
+        index = 0 if handle == 1 else 2
+        collapsed = self._navigation_collapsed if index == 0 else self._details_collapsed
+        width = self.nav_splitter.sizes()[index]
+        setter = self._set_navigation_collapsed if index == 0 else self._set_details_collapsed
+        if width <= 90:
+            if not collapsed:
+                self._remember_sidebar_width(index, 0)
+            setter(True)
+        elif collapsed:
+            self._remember_sidebar_width(index, 0)
+            setter(False)
 
     def _fit_to_current_screen(self) -> None:
         handle = self.windowHandle()
@@ -819,8 +934,7 @@ class MainWindow(QMainWindow):
                             (self._browser_section == "group")]
             self.group_breadcrumb.hide()
             self.browser.set_folder_title(None)
-            summary = (f"{group_count} 組" if self._browser_section == "group" else
-                       f"{len(compact_rows) - group_count} 部影片")
+            summary = f"{len(compact_rows) - group_count} 部影片／{group_count} 組影片"
         self.single_section_button.setVisible(not folder_view)
         self.group_section_button.setVisible(not folder_view)
         self._refreshing_browser = True
@@ -955,16 +1069,15 @@ class MainWindow(QMainWindow):
             bool(count) and self.root is not None and self.library_id is not None
             and self._pending_recycle_ids is None
         )
+        self.recycle_more_action.setEnabled(self.recycle_button.isEnabled())
         self.compress_button.setEnabled(bool(self.browser.selectedIndexes()) and self.root is not None)
 
     def show_selected_details(self) -> None:
         if self._refreshing_browser:
             return
         indexes = self.browser.selectedIndexes()
-        batch_ids = [index.data(Qt.UserRole) for index in indexes if index.isValid()
-                     and not self.model.rows[index.row()].get("_group_cover")
-                     and not self.model.rows[index.row()].get("group_id")]
-        if len(batch_ids) > 1 and len(batch_ids) == len(indexes):
+        batch_ids = self._selected_video_ids()
+        if len(indexes) > 1 and batch_ids:
             self.details.set_batch(batch_ids)
             return
         video_id = self.selected_video_id()
@@ -1235,6 +1348,12 @@ class MainWindow(QMainWindow):
             self.browser.setCurrentIndex(self.model.index(min(index + 1, self.model.rowCount() - 1)))
 
     def advance_after_complete(self) -> None:
+        video_id, group_id = self.details.completed_identity
+        for number, row in enumerate(self.model.rows):
+            if (row.get("_group_cover") and group_id and row.get("group_id") == group_id
+                    or not row.get("_group_cover") and row["id"] == video_id):
+                self.browser.setCurrentIndex(self.model.index(number))
+                return
         if self.model.rowCount():
             self.browser.setCurrentIndex(self.model.index(0))
         QTimer.singleShot(0, lambda: self.browser.verticalScrollBar().setValue(0))
@@ -1851,23 +1970,81 @@ class MainWindow(QMainWindow):
         self.refresh_videos()
 
     def show_related_videos(self, video_id: str, anchor) -> None:
-        rows = repo.related_videos(self.connection, video_id)
-        if not rows:
-            self.hide_related_videos()
+        if not self.isVisible() or not self.settings.related_popup_enabled:
             return
+        source = repo.video_by_id(self.connection, video_id)
+        if source is None:
+            return
+        source = dict(source)
+        cover = next((row for row in self.model.rows if row["id"] == video_id and row.get("_group_cover")), None)
+        source_ids = repo.group_member_ids(self.connection, cover["group_id"]) if cover else [video_id]
+        if cover:
+            source.update(display_title=cover["group_name"], _group_cover=True,
+                          file_name=f"影片組 · {cover['group_size']} 段")
+        rows = repo.related_videos(self.connection, video_id, limit=9)
         if self._related_popup is None:
             self._related_popup = RelatedVideosPopup(self)
             self._related_popup.video_activated.connect(self._open_related_video)
+            self._related_popup.show_all_requested.connect(self._show_all_related_videos)
+            self._related_popup.entity_requested.connect(self._filter_hover_entity)
+            self._related_popup.tag_requested.connect(self._filter_hover_tag)
         popup = self._related_popup
         popup.hide_timer.stop()
-        popup.show_videos(rows)
         screen = QApplication.screenAt(anchor) or self.screen()
-        area = screen.availableGeometry()
-        x = min(anchor.x(), area.right() - popup.width() + 1)
-        y = min(anchor.y() + 6, area.bottom() - popup.height() + 1)
-        popup.move(max(area.left(), x), max(area.top(), y))
+        area = screen.availableGeometry().adjusted(8, 8, -8, -8)
+        source_rect = QRect(anchor, QSize(1, 1))
+        for number, row in enumerate(self.model.rows):
+            if row["id"] == video_id:
+                rect = self.browser.visualRect(self.model.index(number))
+                source_rect = QRect(self.browser.viewport().mapToGlobal(rect.topLeft()), rect.size()).intersected(area)
+                break
+        gap = 9
+        regions = [
+            QRect(source_rect.right() + gap, area.top(), area.right() - source_rect.right() - gap + 1, area.height()),
+            QRect(area.left(), area.top(), source_rect.left() - area.left() - gap, area.height()),
+            QRect(area.left(), source_rect.bottom() + gap, area.width(), area.bottom() - source_rect.bottom() - gap + 1),
+            QRect(area.left(), area.top(), area.width(), source_rect.top() - area.top() - gap),
+        ]
+        regions = [region for region in regions if region.width() >= 260 and region.height() >= 160]
+        if not regions:
+            popup.hide()
+            return
+        region = max(regions, key=lambda rect: min(680, rect.width()) * min(850, rect.height()))
+        entities = self.connection.execute(
+            "SELECT DISTINCT e.* FROM entities e JOIN video_entities ve ON ve.entity_id=e.id "
+            "JOIN relation_types rt ON rt.id=e.type "
+            f"WHERE ve.video_id IN ({','.join('?' for _ in source_ids)}) "
+            "ORDER BY rt.sort_order,e.sort_order,e.name", source_ids,
+        ).fetchall()
+        tags = self.connection.execute(
+            "SELECT DISTINCT t.id,t.name FROM tags t JOIN video_tags vt ON vt.tag_id=t.id "
+            f"WHERE vt.video_id IN ({','.join('?' for _ in source_ids)}) ORDER BY t.name", source_ids,
+        ).fetchall()
+        popup.show_videos(rows, self.paths.cache, source["display_title"],
+                          video_id, self.model.frame_count, self.settings.frame_interval_ms,
+                          source=source, entities=entities, tags=tags,
+                          relation_types=repo.list_relation_types(self.connection),
+                          max_width=region.width(), max_height=min(850, region.height()))
+        x = max(region.left(), min(source_rect.left(), region.right() - popup.width() + 1))
+        y = max(region.top(), min(source_rect.top(), region.bottom() - popup.height() + 1))
+        popup.move(x, y)
         popup.show()
         popup.raise_()
+
+    def _filter_hover_entity(self, kind: str, identifier: str) -> None:
+        self._filter_hover_results({"entity_ids": [identifier]})
+
+    def _filter_hover_tag(self, identifier: str) -> None:
+        self._filter_hover_results({"tag_all": [identifier]})
+
+    def _filter_hover_results(self, filters: dict) -> None:
+        self._related_popup.hide()
+        self._browser_section = "single"
+        self.single_section_button.setChecked(True)
+        self._select_nav_key("all")
+        self.search.clear()
+        self.advanced_filters = filters
+        self.refresh_videos()
 
     def hide_related_videos(self) -> None:
         if self._related_popup is not None:
@@ -1876,7 +2053,40 @@ class MainWindow(QMainWindow):
     def _open_related_video(self, video_id: str) -> None:
         if self._related_popup is not None:
             self._related_popup.hide()
-        self.open_player(video_id)
+        row = repo.video_by_id(self.connection, video_id)
+        if row is None:
+            return
+        group = group_for_video(self.connection, video_id)
+        self._browser_section = "single"
+        self.single_section_button.setChecked(True)
+        target = f"group:{group['id']}" if group else "all"
+        if self._nav_key() != target:
+            self._select_nav_key(target)
+        self.search.blockSignals(True)
+        self.search.clear()
+        self.search.blockSignals(False)
+        self.advanced_filters = {}
+        self.refresh_videos()
+        for index, candidate in enumerate(self.model.rows):
+            if candidate["id"] == video_id:
+                self.browser.setCurrentIndex(self.model.index(index))
+                self.browser.scrollTo(self.model.index(index))
+                break
+
+    def _show_all_related_videos(self, video_id: str) -> None:
+        if self._related_popup is not None:
+            self._related_popup.hide()
+        self._browser_section = "single"
+        self.single_section_button.setChecked(True)
+        if self._nav_key() != "all":
+            self._select_nav_key("all")
+        self.search.blockSignals(True)
+        self.search.clear()
+        self.search.blockSignals(False)
+        self.advanced_filters = {"related_to": video_id}
+        self.refresh_videos()
+        if not self.model.rowCount():
+            self._set_browser_section("group")
 
     def show_filters(self) -> None:
         dialog = FilterDialog(self.connection, self.advanced_filters, self)
@@ -1888,9 +2098,9 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "篩選值錯誤", str(exc))
 
     def filter_by_entity(self, entity_type: str, identifier: str) -> None:
-        if entity_type not in {"person", "studio"}:
+        if entity_type not in {row["id"] for row in repo.list_relation_types(self.connection)}:
             return
-        self.advanced_filters = {"person_ids" if entity_type == "person" else "studio_ids": [identifier]}
+        self.advanced_filters = {"entity_ids": [identifier]}
         self.refresh_videos()
 
     def show_statistics(self) -> None:
@@ -1934,6 +2144,8 @@ class MainWindow(QMainWindow):
         mode_changed = updated.preview_mode != self.settings.preview_mode
         save_settings(self.paths.settings, updated)
         self.settings = updated
+        if not updated.related_popup_enabled and self._related_popup is not None:
+            self._related_popup.hide()
         self.model.set_preview_mode(updated.preview_mode)
         self.browser.set_timing(updated.hover_delay_ms, updated.frame_interval_ms)
         self.browser.set_related_delay(updated.related_hover_delay_ms)
@@ -2105,6 +2317,10 @@ class MainWindow(QMainWindow):
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
         ) != QMessageBox.Yes:
             return
+        self.browser.stop_hover()
+        if self._related_popup is not None:
+            self._related_popup.hide_timer.stop()
+            self._related_popup.close()
         self.connection.close()
         try:
             previous = restore_backup(self.paths, Path(selected))
@@ -2119,37 +2335,13 @@ class MainWindow(QMainWindow):
             self.refresh_videos()
 
     def batch_relations(self) -> None:
-        ids = expand_group_ids(self.connection, [index.data(Qt.UserRole) for index in self.browser.selectedIndexes()])
+        ids = self._selected_video_ids()
         if not ids:
-            notify_information(self, "請先選取影片", "可按 Ctrl 或 Shift 多選。")
+            notify_information(self, "請先選取影片", "可按 Ctrl 或 Shift 多選影片或影片組。")
             return
-        rows = repo.list_tags(self.connection)
-        labels = [f"{row['group_name']} › {row['name']}" for row in rows]
-        if not labels:
-            notify_information(self, "尚無可用標籤", "請先新增標籤。")
-            return
-        label, ok = QInputDialog.getItem(self, "批次標記", "選擇", labels, 0, False)
-        if not ok:
-            return
-        operation, ok = QInputDialog.getItem(self, "批次標記", "操作", ["加入", "移除"], 0, False)
-        if not ok:
-            return
-        selected_id = rows[labels.index(label)]["id"]
-        try:
-            with self.connection:
-                if operation == "加入":
-                    self.connection.executemany(
-                        "INSERT OR IGNORE INTO video_tags(video_id, tag_id) VALUES (?, ?)",
-                        ((video_id, selected_id) for video_id in ids),
-                    )
-                else:
-                    self.connection.executemany(
-                        "DELETE FROM video_tags WHERE video_id = ? AND tag_id = ?",
-                        ((video_id, selected_id) for video_id in ids),
-                    )
-            self.show_selected_details()
-        except sqlite3.Error as exc:
-            QMessageBox.critical(self, "批次標記失敗", str(exc))
+        if self._details_collapsed:
+            self._set_details_collapsed(False)
+        self.details.set_batch(ids)
 
     def group_selected(self) -> None:
         ids = self._selected_video_ids()
@@ -2456,5 +2648,9 @@ class MainWindow(QMainWindow):
         if self.player is not None and not self.player.close():
             event.ignore()
             return
+        self.browser.stop_hover()
+        if self._related_popup is not None:
+            self._related_popup.hide_timer.stop()
+            self._related_popup.close()
         self.connection.close()
         super().closeEvent(event)

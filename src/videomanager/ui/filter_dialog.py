@@ -7,20 +7,22 @@ from datetime import datetime, time, timezone
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout,
+    QApplication, QComboBox, QDialog, QDialogButtonBox, QGridLayout, QHBoxLayout,
     QLabel, QLineEdit, QScrollArea, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from videomanager.ui.tag_picker import TagPicker
 from videomanager.ui.entity_picker import EntityPicker
+from videomanager.db import repository as repo
 
 
 class FilterDialog(QDialog):
     def __init__(self, connection: sqlite3.Connection, current: dict | None = None, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("進階篩選")
-        self.resize(1080, 760)
-        self.setMinimumSize(840, 580)
+        area = (parent.screen() if parent is not None else QApplication.primaryScreen()).availableGeometry()
+        self.resize(min(1080, area.width() - 32), min(760, area.height() - 64))
+        self.setMinimumSize(700, 560)
         current = current or {}
         layout = QVBoxLayout(self)
         heading = QLabel("先選標籤")
@@ -46,16 +48,20 @@ class FilterDialog(QDialog):
         layout.addLayout(tag_columns, 3)
 
         entity_row = QHBoxLayout()
-        self.person_filter = EntityPicker(connection, "person")
-        self.studio_filter = EntityPicker(connection, "studio")
-        self.person_filter.set_selected(set(current.get("person_ids", [])))
-        self.studio_filter.set_selected(set(current.get("studio_ids", [])))
-        for label, picker in (("人物", self.person_filter), ("片商", self.studio_filter)):
+        self.entity_filters = {}
+        for category in repo.list_relation_types(connection):
+            kind = category["id"]
+            picker = EntityPicker(connection, kind)
+            selected = set(current.get("entity_ids", [])) | set(current.get(f"{kind}_ids", []))
+            picker.set_selected(selected & {row["id"] for row in repo.list_entities(connection, kind)})
+            self.entity_filters[kind] = picker
             column = QVBoxLayout()
-            column.addWidget(QLabel(label))
+            column.addWidget(QLabel(category["name"]))
             column.addWidget(picker)
             entity_row.addLayout(column, 1)
         layout.addLayout(entity_row, 1)
+        self.person_filter = self.entity_filters.get("person")
+        self.studio_filter = self.entity_filters.get("studio")
 
         other = QLabel("其他條件")
         other.setStyleSheet("font-size: 15px; font-weight: 700; color: #e1f4f0; margin-top: 7px;")
@@ -64,8 +70,9 @@ class FilterDialog(QDialog):
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         fields = QWidget()
-        form = QFormLayout(fields)
+        form = QGridLayout(fields)
         form.setContentsMargins(10, 8, 10, 8)
+        form.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         self.duration_min = QLineEdit(str(current.get("duration_min_ms", "") // 1000) if current.get("duration_min_ms") else "")
         self.duration_max = QLineEdit(str(current.get("duration_max_ms", "") // 1000) if current.get("duration_max_ms") else "")
         self.size_min = QLineEdit(str(current.get("size_min", "") / 1024**3) if current.get("size_min") else "")
@@ -87,17 +94,43 @@ class FilterDialog(QDialog):
         self.height = QLineEdit(str(current.get("height_min", "")))
         for field in (self.added_from, self.added_to, self.modified_from, self.modified_to):
             field.setPlaceholderText("YYYY-MM-DD")
-        for label, field in (
-            ("片長最短（秒）", self.duration_min), ("片長最長（秒）", self.duration_max),
-            ("大小最小（GB）", self.size_min), ("大小最大（GB）", self.size_max),
+        def pair(first, second, separator="～"):
+            first.setFixedWidth(96)
+            second.setFixedWidth(96)
+            first.setPlaceholderText("最小")
+            second.setPlaceholderText("最大")
+            group = QWidget()
+            row = QHBoxLayout(group)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.addWidget(first)
+            row.addWidget(QLabel(separator))
+            row.addWidget(second)
+            return group
+
+        self.rating.setFixedWidth(76)
+        self.favorite.setFixedWidth(120)
+        rows = (
+            ("片長（秒）", pair(self.duration_min, self.duration_max)),
+            ("容量（GB）", pair(self.size_min, self.size_max)),
             ("最低星等", self.rating), ("收藏", self.favorite),
-            ("加入日期起", self.added_from), ("加入日期迄", self.added_to),
-            ("修改日期起", self.modified_from), ("修改日期迄", self.modified_to),
-            ("最小寬度", self.width), ("最小高度", self.height),
-        ):
-            form.addRow(label, field)
+            ("加入日期", pair(self.added_from, self.added_to)),
+            ("修改日期", pair(self.modified_from, self.modified_to)),
+            ("最小解析度", pair(self.width, self.height, "×")),
+        )
+        for field in (self.added_from, self.added_to, self.modified_from, self.modified_to):
+            field.setPlaceholderText("YYYY-MM-DD")
+        self.width.setPlaceholderText("寬")
+        self.height.setPlaceholderText("高")
+        for field in (self.added_from, self.added_to, self.modified_from, self.modified_to):
+            field.setFixedWidth(112)
+        for index, (label, field) in enumerate(rows):
+            row, column = index // 2, index % 2 * 2
+            form.addWidget(QLabel(label), row, column)
+            form.addWidget(field, row, column + 1, Qt.AlignLeft)
         scroll.setWidget(fields)
-        layout.addWidget(scroll, 2)
+        scroll.setMinimumHeight(150)
+        scroll.setMaximumHeight(190)
+        layout.addWidget(scroll)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setText("套用篩選")
         buttons.button(QDialogButtonBox.Cancel).setText("取消")
@@ -107,7 +140,7 @@ class FilterDialog(QDialog):
         layout.addWidget(buttons)
 
     def clear_all(self) -> None:
-        for picker in (self.tag_all, self.tag_any, self.tag_not, self.person_filter, self.studio_filter):
+        for picker in (self.tag_all, self.tag_any, self.tag_not, *self.entity_filters.values()):
             picker.set_selected(set())
             picker.search.clear()
             picker.reload()
@@ -159,8 +192,7 @@ class FilterDialog(QDialog):
             selected = sorted(picker.selected_ids())
             if selected:
                 result[key] = selected
-        for picker, key in ((self.person_filter, "person_ids"), (self.studio_filter, "studio_ids")):
-            selected = sorted(picker.selected_ids())
-            if selected:
-                result[key] = selected
+        selected = sorted(set().union(*(picker.selected_ids() for picker in self.entity_filters.values())))
+        if selected:
+            result["entity_ids"] = selected
         return result

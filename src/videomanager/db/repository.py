@@ -22,6 +22,43 @@ SORT_COLUMNS = {
 }
 
 
+_RELATED_ITEMS_CTE = """WITH source_video AS (
+    SELECT id,library_id FROM videos WHERE id=? AND deleted_at IS NULL
+), source_members AS (
+    SELECT id FROM source_video UNION
+    SELECT video_id FROM video_group_members WHERE group_id=(
+        SELECT group_id FROM video_group_members WHERE video_id=(SELECT id FROM source_video))
+), source_entities AS (
+    SELECT DISTINCT entity_id FROM video_entities WHERE video_id IN (SELECT id FROM source_members)
+), candidates AS (
+    SELECT v.id,gm.group_id,g.name AS group_name,COALESCE(gm.group_id,v.id) AS item_id,
+           ROW_NUMBER() OVER (PARTITION BY COALESCE(gm.group_id,v.id)
+                              ORDER BY COALESCE(gm.position,0),v.id) AS member_rank,
+           COUNT(*) OVER (PARTITION BY COALESCE(gm.group_id,v.id)) AS group_size
+    FROM videos v LEFT JOIN video_group_members gm ON gm.video_id=v.id
+    LEFT JOIN video_groups g ON g.id=gm.group_id
+    WHERE v.library_id=(SELECT library_id FROM source_video)
+      AND v.deleted_at IS NULL AND v.missing_since IS NULL
+      AND v.id NOT IN (SELECT id FROM source_members)
+), matches AS (
+    SELECT c.item_id,COUNT(DISTINCT e.id) AS shared_count,
+           GROUP_CONCAT(DISTINCT e.name) AS shared_names,
+           COUNT(DISTINCT CASE WHEN rt.sort_order=0 THEN e.id END) AS priority_0,
+           COUNT(DISTINCT CASE WHEN rt.sort_order=1 THEN e.id END) AS priority_1,
+           COUNT(DISTINCT CASE WHEN rt.sort_order=2 THEN e.id END) AS priority_2
+    FROM candidates c JOIN video_entities ve ON ve.video_id=c.id
+    JOIN source_entities se ON se.entity_id=ve.entity_id
+    JOIN entities e ON e.id=ve.entity_id JOIN relation_types rt ON rt.id=e.type
+    GROUP BY c.item_id
+), related_items AS (
+    SELECT c.id,c.group_id,c.group_name,c.group_size,c.group_id IS NOT NULL AS _group_cover,
+           COALESCE(c.group_name,v.display_title) AS display_title,
+           m.shared_count,m.shared_names,m.priority_0,m.priority_1,m.priority_2
+    FROM candidates c JOIN matches m ON m.item_id=c.item_id JOIN videos v ON v.id=c.id
+    WHERE c.member_rank=1
+) """
+
+
 def _escape_like(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
@@ -116,7 +153,16 @@ def list_videos(
                 ids.update(frontier)
         conditions.append(f"EXISTS (SELECT 1 FROM video_categories vc WHERE vc.video_id = v.id AND vc.category_id IN ({','.join('?' for _ in ids)}))")
         params.extend(sorted(ids))
+    for entity_id in filters.get("entity_ids", []):
+        conditions.append("EXISTS (SELECT 1 FROM video_entities ve WHERE ve.video_id=v.id AND ve.entity_id=?)")
+        params.append(entity_id)
     order = SORT_COLUMNS[sort] + (" DESC" if descending else " ASC") + ", v.id ASC"
+    prefix = related_join = ""
+    if related_to := filters.get("related_to"):
+        prefix = _RELATED_ITEMS_CTE
+        params.insert(0, related_to)
+        related_join = " JOIN related_items ri ON ri.id=v.id OR (ri.group_id IS NOT NULL AND ri.group_id=gm.group_id) "
+        order = "ri.priority_0 DESC,ri.priority_1 DESC,ri.priority_2 DESC," + order
     sql = (
         """SELECT v.*, j.state AS thumbnail_state, j.cache_signature AS thumbnail_signature,
                   gm.group_id, gm.position AS group_position, g.name AS group_name,
@@ -129,10 +175,10 @@ def list_videos(
                   ) AS is_compressed
            FROM videos v LEFT JOIN thumbnail_jobs j ON j.video_id = v.id
            LEFT JOIN video_group_members gm ON gm.video_id = v.id
-           LEFT JOIN video_groups g ON g.id = gm.group_id WHERE """
+           LEFT JOIN video_groups g ON g.id = gm.group_id """ + related_join + " WHERE "
         + " AND ".join(conditions) + " ORDER BY " + order + " LIMIT ? OFFSET ?"
     )
-    return connection.execute(sql, (*params, limit, offset)).fetchall()
+    return connection.execute(prefix + sql, (*params, limit, offset)).fetchall()
 
 
 def video_by_id(connection: sqlite3.Connection, video_id: str) -> sqlite3.Row | None:
@@ -150,6 +196,7 @@ def save_video_details(
     rating: int, is_favorite: bool, recorded_at: str | None, status: str,
     tag_ids: Iterable[str], group_cover: bool = False,
     entity_ids: Iterable[str] | None = None,
+    preserve_hidden_fields: bool = False,
 ) -> None:
     """Save a part's title and the metadata shared by its whole video group atomically."""
     title = title.strip()
@@ -172,11 +219,17 @@ def save_video_details(
             connection.execute("UPDATE video_groups SET name = ? WHERE id = ?", (title, group_id))
         else:
             connection.execute("UPDATE videos SET display_title = ? WHERE id = ?", (title, video_id))
-        connection.executemany(
-            """UPDATE videos SET notes = ?, rating = ?, is_favorite = ?,
-               recorded_at = ?, status = ? WHERE id = ?""",
-            ((notes, rating, int(is_favorite), recorded_at, status, member_id) for member_id in members),
-        )
+        if preserve_hidden_fields:
+            connection.executemany(
+                "UPDATE videos SET rating=?, is_favorite=?, status=? WHERE id=?",
+                ((rating, int(is_favorite), status, member_id) for member_id in members),
+            )
+        else:
+            connection.executemany(
+                """UPDATE videos SET notes = ?, rating = ?, is_favorite = ?,
+                   recorded_at = ?, status = ? WHERE id = ?""",
+                ((notes, rating, int(is_favorite), recorded_at, status, member_id) for member_id in members),
+            )
         connection.executemany("DELETE FROM video_tags WHERE video_id = ?", ((member_id,) for member_id in members))
         connection.executemany(
             "INSERT INTO video_tags(video_id, tag_id) VALUES (?, ?)",
@@ -405,19 +458,88 @@ def video_tag_ids(connection: sqlite3.Connection, video_id: str) -> set[str]:
     return {row[0] for row in connection.execute("SELECT tag_id FROM video_tags WHERE video_id = ?", (video_id,))}
 
 
+def list_relation_types(connection: sqlite3.Connection) -> list[sqlite3.Row]:
+    return connection.execute("SELECT * FROM relation_types ORDER BY sort_order,id").fetchall()
+
+
+def create_relation_type(connection: sqlite3.Connection, name: str) -> str:
+    name = name.strip()
+    if not name:
+        raise ValueError("請輸入類別名稱。")
+    identifier = str(uuid4())
+    with connection:
+        count = connection.execute("SELECT COUNT(*) FROM relation_types").fetchone()[0]
+        if count >= 3:
+            raise ValueError("最多三種關聯類別。")
+        connection.execute("INSERT INTO relation_types VALUES (?,?,?)", (identifier, name, count))
+    return identifier
+
+
+def rename_relation_type(connection: sqlite3.Connection, identifier: str, name: str) -> None:
+    if not name.strip():
+        raise ValueError("請輸入類別名稱。")
+    with connection:
+        if connection.execute("UPDATE relation_types SET name=? WHERE id=?", (name.strip(), identifier)).rowcount != 1:
+            raise ValueError("找不到關聯類別。")
+
+
+def move_relation_type(connection: sqlite3.Connection, identifier: str, step: int) -> None:
+    identifiers = [row["id"] for row in list_relation_types(connection)]
+    if identifier not in identifiers or step not in (-1, 1):
+        raise ValueError("無效的類別順序。")
+    position = identifiers.index(identifier)
+    target = max(0, min(len(identifiers) - 1, position + step))
+    identifiers.insert(target, identifiers.pop(position))
+    with connection:
+        connection.executemany("UPDATE relation_types SET sort_order=? WHERE id=?", enumerate(identifiers))
+
+
+def delete_relation_type(connection: sqlite3.Connection, identifier: str) -> None:
+    with connection:
+        if connection.execute("SELECT COUNT(*) FROM relation_types").fetchone()[0] <= 1:
+            raise ValueError("至少保留一種關聯類別。")
+        if connection.execute("SELECT 1 FROM entities WHERE type=? LIMIT 1", (identifier,)).fetchone():
+            raise ValueError("此類別仍有關聯項目，請先移除項目或直接更改類別名稱。")
+        if connection.execute("DELETE FROM relation_types WHERE id=?", (identifier,)).rowcount != 1:
+            raise ValueError("找不到關聯類別。")
+        connection.executemany("UPDATE relation_types SET sort_order=? WHERE id=?",
+                               ((index, row["id"]) for index, row in enumerate(list_relation_types(connection))))
+
+
 def list_entities(connection: sqlite3.Connection, entity_type: str) -> list[sqlite3.Row]:
-    if entity_type not in {"person", "studio"}:
+    if not connection.execute("SELECT 1 FROM relation_types WHERE id=?", (entity_type,)).fetchone():
         raise ValueError("Invalid entity type")
-    return connection.execute("SELECT id, type, name FROM entities WHERE type=? ORDER BY name COLLATE NOCASE", (entity_type,)).fetchall()
+    return connection.execute("SELECT id, type, name, thumbnail_png, sort_order FROM entities WHERE type=? ORDER BY sort_order,name COLLATE NOCASE,id", (entity_type,)).fetchall()
+
+
+def move_entity(connection: sqlite3.Connection, identifier: str, step: int) -> None:
+    row = connection.execute("SELECT type FROM entities WHERE id=?", (identifier,)).fetchone()
+    if row is None or step not in (-1, 1):
+        raise ValueError("找不到關聯項目或移動方向不正確。")
+    identifiers = [item["id"] for item in list_entities(connection, row["type"])]
+    position = identifiers.index(identifier)
+    target = max(0, min(len(identifiers) - 1, position + step))
+    identifiers.insert(target, identifiers.pop(position))
+    with connection:
+        connection.executemany("UPDATE entities SET sort_order=? WHERE id=?", enumerate(identifiers))
+
+
+def set_entity_thumbnail(connection: sqlite3.Connection, entity_id: str, png: bytes | None) -> None:
+    if png is not None and (not png.startswith(b"\x89PNG\r\n\x1a\n") or len(png) > 128 * 1024):
+        raise ValueError("縮圖必須是 128 KB 以下的 PNG。")
+    with connection:
+        if connection.execute("UPDATE entities SET thumbnail_png=? WHERE id=?", (png, entity_id)).rowcount != 1:
+            raise ValueError("找不到此人物或片商。")
 
 
 def create_entity(connection: sqlite3.Connection, entity_type: str, name: str) -> str:
     name = name.strip()
-    if entity_type not in {"person", "studio"} or not name:
+    if not name or not connection.execute("SELECT 1 FROM relation_types WHERE id=?", (entity_type,)).fetchone():
         raise ValueError("請輸入有效名稱。")
     identifier = str(uuid4())
     with connection:
-        connection.execute("INSERT INTO entities(id,type,name) VALUES(?,?,?)", (identifier, entity_type, name))
+        position = connection.execute("SELECT COALESCE(MAX(sort_order),-1)+1 FROM entities WHERE type=?", (entity_type,)).fetchone()[0]
+        connection.execute("INSERT INTO entities(id,type,name,sort_order) VALUES(?,?,?,?)", (identifier, entity_type, name, position))
     return identifier
 
 
@@ -451,18 +573,9 @@ def related_videos(connection: sqlite3.Connection, video_id: str, limit: int = 6
     if not 1 <= limit <= 20:
         raise ValueError("Invalid related video limit")
     return connection.execute(
-        """SELECT v.id, v.display_title, COUNT(DISTINCT related.entity_id) AS shared_count,
-                  GROUP_CONCAT(DISTINCT e.name) AS shared_names
-           FROM video_entities source
-           JOIN video_entities related ON related.entity_id=source.entity_id AND related.video_id<>source.video_id
-           JOIN entities e ON e.id=related.entity_id
-           JOIN videos v ON v.id=related.video_id AND v.deleted_at IS NULL AND v.missing_since IS NULL
-           WHERE source.video_id=? AND NOT EXISTS (
-               SELECT 1 FROM video_group_members a
-               JOIN video_group_members b ON b.group_id=a.group_id
-               WHERE a.video_id=source.video_id AND b.video_id=v.id
-           )
-           GROUP BY v.id ORDER BY shared_count DESC, v.display_title COLLATE NOCASE LIMIT ?""",
+        _RELATED_ITEMS_CTE + """SELECT * FROM related_items
+           ORDER BY priority_0 DESC,priority_1 DESC,priority_2 DESC,
+                    display_title COLLATE NOCASE,id LIMIT ?""",
         (video_id, limit),
     ).fetchall()
 

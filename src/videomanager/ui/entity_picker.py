@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import sqlite3
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (QInputDialog, QGridLayout, QHBoxLayout, QLineEdit,
-                               QMessageBox, QPushButton, QScrollArea, QVBoxLayout,
-                               QWidget, QLabel)
+                               QMenu, QMessageBox, QPushButton, QScrollArea, QVBoxLayout,
+                               QWidget, QLabel, QSizePolicy)
 
 from videomanager.db import repository as repo
+from videomanager.ui.entity_images import choose_entity_thumbnail, thumbnail_icon
 
 
 class EntityPicker(QWidget):
@@ -39,7 +40,7 @@ class EntityPicker(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
         layout.addLayout(header)
-        layout.addWidget(self.scroll)
+        layout.addWidget(self.scroll, 1)
         self.setStyleSheet("""
             QPushButton#entityChip { text-align: left; background: #22333d; color: #dcebed;
                 border: 1px solid #3a5660; border-radius: 7px; padding: 3px 7px; min-height: 22px; }
@@ -58,17 +59,26 @@ class EntityPicker(QWidget):
         grid = QGridLayout(container)
         grid.setContentsMargins(5, 4, 5, 4)
         grid.setSpacing(4)
+        grid.setAlignment(Qt.AlignTop)
         self._buttons = {}
         rows = [row for row in repo.list_entities(self.connection, self.entity_type)
                 if not query or query in row["name"].casefold()]
         for index, row in enumerate(rows):
             identifier = row["id"]
             button = QPushButton(row["name"])
+            button.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+            button.setIcon(thumbnail_icon(row["thumbnail_png"]))
+            button.setIconSize(QSize(28, 28))
             button.setObjectName("entityChip")
             button.setCheckable(True)
             button.setChecked(identifier in self._selected)
-            button.setToolTip("點一下加入／移除；名稱可在「管理標籤／關聯」修改")
+            button.setToolTip(f"{row['name']}\n點一下加入／移除；按右鍵可設定辨識縮圖")
             button.clicked.connect(lambda checked, entity_id=identifier: self._toggle(entity_id, checked))
+            button.setContextMenuPolicy(Qt.CustomContextMenu)
+            button.customContextMenuRequested.connect(
+                lambda point, entity_id=identifier, chip=button, has_image=bool(row["thumbnail_png"]):
+                self._thumbnail_menu(entity_id, chip, point, has_image)
+            )
             grid.addWidget(button, index // 2, index % 2)
             self._buttons[identifier] = button
         if not rows:
@@ -79,6 +89,24 @@ class EntityPicker(QWidget):
         grid.setColumnStretch(1, 1)
         self.scroll.setWidget(container)
         self.scroll.verticalScrollBar().setValue(previous_scroll)
+
+    def _thumbnail_menu(self, entity_id: str, button: QPushButton, point, has_image: bool) -> None:
+        menu = QMenu(button)
+        menu.addAction("設定小縮圖…", lambda: self._choose_thumbnail(entity_id))
+        if has_image:
+            menu.addAction("移除小縮圖", lambda: self._remove_thumbnail(entity_id))
+        menu.exec(button.mapToGlobal(point))
+
+    def _choose_thumbnail(self, entity_id: str) -> None:
+        if choose_entity_thumbnail(self, self.connection, entity_id):
+            self.reload()
+
+    def _remove_thumbnail(self, entity_id: str) -> None:
+        try:
+            repo.set_entity_thumbnail(self.connection, entity_id, None)
+            self.reload()
+        except (sqlite3.Error, ValueError) as exc:
+            QMessageBox.warning(self, "移除縮圖失敗", str(exc))
 
     def _toggle(self, identifier: str, checked: bool) -> None:
         if checked:
@@ -97,7 +125,7 @@ class EntityPicker(QWidget):
         self.selectionChanged.emit()
 
     def add_entity(self) -> None:
-        label = "人物" if self.entity_type == "person" else "片商"
+        label = next(row["name"] for row in repo.list_relation_types(self.connection) if row["id"] == self.entity_type)
         name, ok = QInputDialog.getText(self, f"新增{label}", f"{label}名稱")
         if not ok or not name.strip():
             return

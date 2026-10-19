@@ -51,7 +51,7 @@ def _encoder_available(cap: Capabilities, encoder: str) -> bool:
 
 
 def _probe(ffprobe: str, path: Path) -> dict:
-    result = subprocess.run([ffprobe, "-v", "error", "-show_format", "-show_streams", "-of", "json", str(path)],
+    result = subprocess.run([ffprobe, "-v", "error", "-show_format", "-show_streams", "-show_chapters", "-of", "json", str(path)],
                             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     if result.returncode:
@@ -64,7 +64,7 @@ def _probe(ffprobe: str, path: Path) -> dict:
         if duration <= 0:
             raise ValueError("缺少片長")
         return {"duration": duration, "video": video, "audio": audio,
-                "streams": data["streams"], "format": data["format"]}
+                "streams": data["streams"], "format": data["format"], "chapters": data.get("chapters", [])}
     except (KeyError, StopIteration, TypeError, ValueError) as exc:
         raise CompressionError(f"無法取得有效影片資訊：{exc}") from exc
 
@@ -177,7 +177,12 @@ def _run_ffmpeg(command: list[str], duration: float, cancelled, progress,
                     continue
                 key, _, value = line.strip().partition("=")
                 if key == "out_time_us":
-                    last_percent = min(99.0, max(0.0, float(value) / (duration * 1_000_000) * 100))
+                    try:
+                        elapsed_us = int(value)
+                    except ValueError:
+                        # FFmpeg can report N/A before an encoder produces timestamps.
+                        continue
+                    last_percent = min(99.0, max(0.0, elapsed_us / (duration * 1_000_000) * 100))
                     progress(last_percent)
                     last_heartbeat = now
             out_thread.join(timeout=2)

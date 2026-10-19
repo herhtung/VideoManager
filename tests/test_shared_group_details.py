@@ -48,6 +48,9 @@ class SharedGroupDetailsTests(unittest.TestCase):
                 ids = [row["id"] for row in rows]
                 original_titles = [row["display_title"] for row in rows]
                 group_id = create_video_group(connection, library_id, "原組名", ids)
+                for number, identifier in enumerate(ids, 1):
+                    repo.update_video(connection, identifier, notes=f"原備註 {number}",
+                                      recorded_at=f"2026-01-0{number}")
                 tag_group = repo.create_tag_group(connection, "類型")
                 first_tag = repo.create_tag(connection, tag_group, "甲")
                 second_tag = repo.create_tag(connection, tag_group, "乙")
@@ -79,15 +82,15 @@ class SharedGroupDetailsTests(unittest.TestCase):
                 window.details.title.setText("更新後的組名")
                 window.details.rating.setValue(4)
                 window.details.favorite.setChecked(True)
-                window.details.notes.setPlainText("整組備註")
                 window.details.tags.set_selected({first_tag})
                 self.assertTrue(window.details.save_current())
                 self.assertEqual(window.model.rows[cover_index]["group_name"], "更新後的組名")
-                for identifier, original_title in zip(ids, original_titles):
+                for number, (identifier, original_title) in enumerate(zip(ids, original_titles), 1):
                     video = repo.video_by_id(window.connection, identifier)
                     self.assertEqual(video["display_title"], original_title)
                     self.assertEqual(video["rating"], 4)
-                    self.assertEqual(video["notes"], "整組備註")
+                    self.assertEqual(video["notes"], f"原備註 {number}")
+                    self.assertEqual(video["recorded_at"], f"2026-01-0{number}")
                     self.assertEqual(video["is_favorite"], 1)
                     self.assertEqual(repo.video_tag_ids(window.connection, identifier), {first_tag})
 

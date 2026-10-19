@@ -437,6 +437,11 @@ class BrowserView(QListView):
         super().mousePressEvent(event)
 
     def viewportEvent(self, event) -> bool:
+        if event.type() == QEvent.ToolTip:
+            index = self.indexAt(event.pos())
+            if index.isValid():
+                event.accept()
+                return True
         if event.type() == QEvent.ContextMenu:
             self.context_menu_requested.emit(event.pos())
             event.accept()
@@ -489,8 +494,6 @@ class BrowserView(QListView):
         if self._hover_candidate < 0 or self._hover_candidate >= len(self.model().rows):
             return
         row = self.model().rows[self._hover_candidate]
-        if row.get("_group_cover"):
-            return
         rect = self.visualRect(self.model().index(self._hover_candidate))
         self._related_visible = True
         self.related_hover_requested.emit(row["id"], self.viewport().mapToGlobal(rect.bottomLeft()))

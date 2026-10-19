@@ -411,6 +411,14 @@ class CompressionCenter(QDialog):
         self.worker: CompressionThread | None = None
         self.analysis_worker: CompressionThread | None = None
         self.replacement_worker: CompressionThread | None = None
+        self._batch_replace_queue: list[str] = []
+        self._batch_replace_total = 0
+        self._batch_replace_success = 0
+        self._batch_replace_errors: dict[str, str] = {}
+        self._batch_replacing_id: str | None = None
+        self._batch_replace_timer = QTimer(self)
+        self._batch_replace_timer.setInterval(1000)
+        self._batch_replace_timer.timeout.connect(self._pump_batch_replacements)
         self.cut_worker: CutThread | None = None
         self._analysis_waiting: list[str] = []
         self._batch_accepted_bitrate_warning = False
@@ -447,6 +455,9 @@ class CompressionCenter(QDialog):
         heading.setObjectName("sectionLabel")
         heading_row.addWidget(heading, 1)
         if not self.edit_only:
+            self.confirm_all_replace_button = QPushButton("確認全部待替換…")
+            self.confirm_all_replace_button.clicked.connect(self.confirm_all_replace)
+            heading_row.addWidget(self.confirm_all_replace_button)
             self.history_button = QPushButton("歷史紀錄")
             self.history_button.clicked.connect(self.show_history)
             heading_row.addWidget(self.history_button)
@@ -944,6 +955,7 @@ class CompressionCenter(QDialog):
             self._attach_videos_to_jobs(initial)
         self._pump_analysis()
         self._pump_encode()
+        self._update_replace_all_button()
 
     def _load_selected_profile(self) -> None:
         identifier = self._selected_id()
@@ -1068,7 +1080,17 @@ class CompressionCenter(QDialog):
         if errors:
             QMessageBox.warning(self, "部分影片未加入", "\n".join(errors[:5]))
 
+    def _update_replace_all_button(self) -> None:
+        done = self._batch_replace_total - len(self._batch_replace_queue) - bool(self._batch_replacing_id)
+        self.confirm_all_replace_button.setText(
+            f"批次替換 {done}/{self._batch_replace_total}" if self._batch_replace_total else "確認全部待替換…")
+        self.confirm_all_replace_button.setEnabled(
+            self.root is not None and self.capabilities is not None and not self._closing
+            and self.replacement_worker is None and self.cut_worker is None
+            and not self._batch_replace_total and bool(self._replacement_candidates()))
+
     def refresh_jobs(self, selected: str | None = None) -> None:
+        self._update_replace_all_button()
         selected = selected or self._selected_id()
         history_selected = self._selected_history_id()
         jobs.prune_terminal_jobs(self.connection, self.library_id, self.root)
@@ -1320,7 +1342,7 @@ class CompressionCenter(QDialog):
 
         self.schedule_from_analysis.setEnabled(row["status"] == "analyzed" and
                                                not row["encode_queued"])
-        self.replace_button.setEnabled(row["status"] == "completed" and
+        self.replace_button.setEnabled(not self._batch_replace_total and row["status"] == "completed" and
                                        self.replacement_worker is None and self.cut_worker is None and
                                        not self._analysis_uses_video(row["video_id"]) and
                                        not self._worker_uses_video(self.worker, row["video_id"]))
@@ -1432,6 +1454,8 @@ class CompressionCenter(QDialog):
 
     def _worker_result(self, thread: CompressionThread, error: str) -> None:
         if error:
+            if thread.job_id == self._batch_replacing_id:
+                self._batch_replace_errors[thread.job_id] = error
             self.job_notice.emit(f"壓縮工作未完成：{error[:200]}")
 
     def _worker_finished(self, worker: CompressionThread) -> None:
@@ -1454,6 +1478,12 @@ class CompressionCenter(QDialog):
             replacement = self.connection.execute(
                 "SELECT state FROM compression_replacements WHERE job_id=?", (worker.job_id,)
             ).fetchone()
+            if worker.job_id == self._batch_replacing_id:
+                if row and replacement and replacement[0] == "complete":
+                    self._batch_replace_success += 1
+                else:
+                    self._batch_replace_errors.setdefault(worker.job_id, "替換未完成，原片與副本仍保留。")
+                self._batch_replacing_id = None
             if row and replacement and replacement[0] == ("restored" if worker.mode == "restore" else "complete"):
                 if worker.mode == "restore":
                     self.show_history()
@@ -1657,6 +1687,91 @@ class CompressionCenter(QDialog):
         else:
             notify_information(self, "檔案不可用", "原片或壓縮副本已不在預期位置；請檢查影片庫磁碟。")
 
+    def _replacement_candidates(self) -> list[str]:
+        rows = self.connection.execute(
+            """SELECT j.id,j.video_id FROM compression_jobs j JOIN videos v ON v.id=j.video_id
+               WHERE j.library_id=? AND j.status='completed' AND v.deleted_at IS NULL
+               ORDER BY COALESCE(j.finished_at,j.created_at) DESC,j.created_at DESC,j.id DESC""",
+            (self.library_id,),
+        ).fetchall()
+        seen = set()
+        result = []
+        for row in rows:
+            if row["video_id"] not in seen:
+                result.append(row["id"])
+                seen.add(row["video_id"])
+        return result
+
+    def confirm_all_replace(self) -> None:
+        if (self._closing or self._batch_replace_total or self.replacement_worker or self.cut_worker
+                or self.root is None or self.capabilities is None):
+            return
+        identifiers = self._replacement_candidates()
+        if not identifiers:
+            return
+        message = (f"一次確認 {len(identifiers)} 部待替換影片，每部採用最新完成的副本。\n\n"
+                   "請先確認已播放比較。確認後會在背景逐部驗證與替換，不合格的項目會略過並通知。\n\n"
+                   "依目前原片保留規則，僅保留最近 3 部原片供還原；之後成功替換時會清除最舊的保留原片。")
+        if QMessageBox.question(self, "確認全部替換", message,
+                                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return
+        self._batch_replace_queue = identifiers
+        self._batch_replace_total = len(identifiers)
+        self._batch_replace_success = 0
+        self._batch_replace_errors = {}
+        self.confirm_all_replace_button.setEnabled(False)
+        self._batch_replace_timer.start()
+        self._pump_batch_replacements()
+
+    def _pump_batch_replacements(self) -> None:
+        if self._closing or not self._batch_replace_total:
+            self._batch_replace_timer.stop()
+            return
+        if self.replacement_worker or self.cut_worker:
+            return
+        for _ in range(len(self._batch_replace_queue)):
+            identifier = self._batch_replace_queue.pop(0)
+            row = jobs.get_job(self.connection, identifier)
+            if row and (self._analysis_uses_video(row["video_id"])
+                        or self._worker_uses_video(self.worker, row["video_id"])):
+                self._batch_replace_queue.append(identifier)
+                continue
+            reason = ""
+            if row is None or row["status"] != "completed":
+                reason = "工作狀態已改變"
+            else:
+                try:
+                    details = json.loads(row["sample_quality_details_json"] or "{}")
+                    if details.get("hdr_or_rotation"):
+                        reason = "含特殊色彩或旋轉資訊，無法安全替換"
+                    elif not (self.root / row["source_rel_path"]).is_file() or not (
+                            row["output_rel_path"] and (self.root / row["output_rel_path"]).is_file()):
+                        reason = "原片或壓縮副本找不到"
+                except (ValueError, OSError) as exc:
+                    reason = str(exc)
+            if reason:
+                self._batch_replace_errors[identifier] = reason
+                name = Path(row["source_rel_path"]).name if row else identifier
+                self.job_notice.emit(f"批次替換略過 {name}：{reason}")
+                continue
+            self._batch_replacing_id = identifier
+            self._start_replace(identifier)
+            if self.replacement_worker is not None:
+                return
+            self._batch_replacing_id = None
+            self._batch_replace_errors[identifier] = "無法啟動替換工作"
+        if not self._batch_replace_queue:
+            total, succeeded = self._batch_replace_total, self._batch_replace_success
+            self._batch_replace_total = 0
+            self._batch_replace_timer.stop()
+            message = f"批次替換完成：成功 {succeeded}/{total} 部；未完成 {total - succeeded} 部。"
+            for identifier, reason in list(self._batch_replace_errors.items())[:10]:
+                row = jobs.get_job(self.connection, identifier)
+                name = Path(row["source_rel_path"]).name if row else identifier
+                message += f"\n{name}：{reason}"
+            self.job_notice.emit(message)
+            self.refresh_jobs()
+
     def confirm_replace(self) -> None:
         identifier = self._selected_id()
         row = jobs.get_job(self.connection, identifier) if identifier else None
@@ -1664,7 +1779,7 @@ class CompressionCenter(QDialog):
             return
         if row["status"] == "replaced":
             return
-        if (row["status"] != "completed" or self.root is None or self.replacement_worker or self.cut_worker
+        if (self._batch_replace_total or row["status"] != "completed" or self.root is None or self.replacement_worker or self.cut_worker
                 or self._analysis_uses_video(row["video_id"])
                 or self._worker_uses_video(self.worker, row["video_id"])):
             return
@@ -1906,10 +2021,14 @@ class CompressionCenter(QDialog):
     def has_active_work(self) -> bool:
         return (self.worker is not None or self.analysis_worker is not None
                 or self.replacement_worker is not None or self.cut_worker is not None
-                or bool(self._analysis_waiting))
+                or bool(self._analysis_waiting) or bool(self._batch_replace_total))
 
     def stop_for_app_exit(self) -> None:
         self._closing = True
+        self._batch_replace_queue.clear()
+        self._batch_replace_total = 0
+        self._batch_replacing_id = None
+        self._batch_replace_timer.stop()
         self._analysis_waiting.clear()
         if self.worker is not None:
             self.worker.interrupt_for_exit()

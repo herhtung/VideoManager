@@ -61,7 +61,7 @@ class P0Tests(unittest.TestCase):
         settings = load_settings(self.paths.settings)
         self.assertEqual(settings.library_id, first.marker.library_id)
         with closing(open_database(self.paths.database, self.paths.backups)) as connection:
-            self.assertEqual(connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0], 9)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0], 13)
             self.assertEqual(connection.execute("SELECT id FROM libraries").fetchone()[0], first.marker.library_id)
             self.assertEqual(connection.execute("PRAGMA foreign_keys").fetchone()[0], 1)
 
@@ -73,7 +73,7 @@ class P0Tests(unittest.TestCase):
             old.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (1, '2026-01-01')")
             old.commit()
         with closing(open_database(self.paths.database, self.paths.backups)) as upgraded:
-            self.assertEqual(upgraded.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0], 9)
+            self.assertEqual(upgraded.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0], 13)
             self.assertIn("unique_category_id", [row[1] for row in upgraded.execute("PRAGMA table_info(videos)")])
         self.assertEqual(len(list(self.paths.backups.glob("*.db"))), 1)
 

@@ -8,6 +8,7 @@ import shutil
 import sqlite3
 import subprocess
 from collections import Counter
+from fractions import Fraction
 from pathlib import Path
 from uuid import uuid4
 
@@ -90,8 +91,50 @@ def prune_preserved_originals(connection: sqlite3.Connection, root: Path, keep: 
 
 
 def _extra_streams(info: dict) -> Counter:
-    return Counter((stream.get("codec_type"), stream.get("codec_name"))
+    return Counter((stream.get("codec_type"), stream.get("codec_name"), stream.get("codec_tag_string"))
                    for stream in info["streams"] if stream.get("codec_type") not in {"video", "audio"})
+
+
+def _chapter_ms(chapter: dict, key: str) -> int:
+    if chapter.get(key + "_time") is not None:
+        return round(float(chapter[key + "_time"]) * 1000)
+    return round(int(chapter[key]) * Fraction(chapter["time_base"]) * 1000)
+
+
+def _metadata_escape(value) -> str:
+    value = str(value).replace("\\", "\\\\").replace("\r", "").replace("\n", "\\\n")
+    for character in ("=", ";", "#"):
+        value = value.replace(character, "\\" + character)
+    return value
+
+
+def _chapter_metadata(chapters: list[dict]) -> str:
+    lines = [";FFMETADATA1"]
+    for chapter in chapters:
+        start, end = _chapter_ms(chapter, "start"), _chapter_ms(chapter, "end")
+        if start < 0 or end <= start:
+            raise CompressionError("章節時間無效，停止替換")
+        lines.extend(("[CHAPTER]", "TIMEBASE=1/1000", f"START={start}", f"END={end}"))
+        lines.extend(f"{_metadata_escape(key)}={_metadata_escape(value)}" for key, value in chapter.get("tags", {}).items())
+    return "\n".join(lines) + "\n"
+
+
+def _validate_chapters(original: list[dict], actual: list[dict], *,
+                       source_duration_ms: int | None = None,
+                       output_duration_ms: int | None = None) -> None:
+    if len(original) != len(actual):
+        raise CompressionError("章節數量驗證不符")
+    for index, (before, after) in enumerate(zip(original, actual)):
+        expected_end = _chapter_ms(before, "end")
+        if (index == len(original) - 1 and source_duration_ms is not None
+                and output_duration_ms is not None and abs(expected_end - source_duration_ms) <= 2):
+            # MP4 clips the final chapter to the verified copy's last audio/video packet.
+            expected_end = min(expected_end, output_duration_ms)
+        if (abs(_chapter_ms(before, "start") - _chapter_ms(after, "start")) > 2
+                or abs(expected_end - _chapter_ms(after, "end")) > 2):
+            raise CompressionError("章節時間驗證不符")
+        if any(str(after.get("tags", {}).get(key, "")) != str(value) for key, value in before.get("tags", {}).items()):
+            raise CompressionError("章節標題或資料驗證不符")
 
 
 def _restore_extra_streams(capabilities, root: Path, source: Path, output: Path,
@@ -99,23 +142,50 @@ def _restore_extra_streams(capabilities, root: Path, source: Path, output: Path,
     """Copy the original's non-AV streams into a verified compression copy."""
     _space_guard(root, output.stat().st_size + 256 * 2**20)
     temporary = output.with_name(f".{uuid4().hex}.streams.mp4")
+    metadata = temporary.with_suffix(".ffmeta")
     try:
+        chapters = original_info.get("chapters", [])
+        inputs = []
+        extra_maps = ["-map", "1:s?", "-map", "1:d?", "-map", "1:t?"]
+        if chapters:
+            # Rebuild from verified chapter times instead of reusing a broken QT track reference.
+            metadata.write_text(_chapter_metadata(chapters), encoding="utf-8")
+            inputs = ["-f", "ffmetadata", "-i", str(metadata)]
+            extra_maps = []
+            for stream in original_info["streams"]:
+                if (stream.get("codec_type") == "data" and stream.get("codec_name") == "bin_data"
+                        and stream.get("codec_tag_string") == "text"):
+                    continue  # Recreated as a validated chapter track, not a duplicate data track.
+                if stream.get("codec_type") in {"subtitle", "data", "attachment"}:
+                    extra_maps.extend(("-map", f"1:{stream['index']}"))
         command = [capabilities.ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error",
-                   "-i", str(output), "-i", str(source), "-map", "0:v:0", "-map", "0:a:0?",
-                   "-map", "1:s?", "-map", "1:d?", "-map", "1:t?", "-map_metadata", "1",
-                   "-map_chapters", "1", "-c", "copy", "-movflags", "+faststart",
+                   "-i", str(output), "-i", str(source), *inputs, "-map", "0:v:0", "-map", "0:a:0?",
+                   *extra_maps, "-map_metadata", "1",
+                   "-map_chapters", "2" if chapters else "1", "-c", "copy", "-movflags", "+faststart",
                    "-f", "mp4", "-n", str(temporary)]
         result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8",
                                 errors="replace", creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         if result.returncode:
             raise CompressionError("無法把原片的附加串流保留到 MP4：" + result.stderr[-500:])
         remuxed = _validate_output(capabilities, original_info, temporary, profile)
-        if _extra_streams(remuxed) != _extra_streams(original_info):
-            raise CompressionError("附加串流驗證不符")
+        expected, actual = _extra_streams(original_info), _extra_streams(remuxed)
+        if chapters:
+            _validate_chapters(chapters, remuxed.get("chapters", []),
+                               source_duration_ms=round(original_info["duration"] * 1000),
+                               output_duration_ms=round(remuxed["duration"] * 1000))
+            chapter_track = ("data", "bin_data", "text")
+            # MP4 may store the verified chapters in a chapter table, a text track,
+            # or both. Compare their content above rather than that storage choice.
+            if expected[chapter_track] <= 1 and actual[chapter_track] <= 1:
+                expected.pop(chapter_track, None)
+                actual.pop(chapter_track, None)
+        if actual != expected:
+            raise CompressionError(f"附加串流驗證不符：預期 {dict(expected)}，實際 {dict(actual)}")
         os.replace(temporary, output)
         return remuxed
     finally:
         temporary.unlink(missing_ok=True)
+        metadata.unlink(missing_ok=True)
 
 
 def replace_original(connection: sqlite3.Connection, root: Path, cache_root: Path,
@@ -134,7 +204,7 @@ def replace_original(connection: sqlite3.Connection, root: Path, cache_root: Pat
     profile = Profile(**json.loads(job["profile_snapshot_json"])).validate()
     original_info = _probe(capabilities.ffprobe, source)
     output_info = _validate_output(capabilities, original_info, output, profile)
-    if _extra_streams(original_info):
+    if _extra_streams(original_info) or original_info.get("chapters"):
         try:
             output_info = _restore_extra_streams(capabilities, root, source, output, original_info, profile)
         except (CompressionError, OSError) as exc:

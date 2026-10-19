@@ -6,6 +6,7 @@ import json
 import os
 import tempfile
 import unittest
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -13,6 +14,7 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest, QSignalSpy
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from videomanager.config import AppPaths
@@ -118,6 +120,74 @@ class CenterBindingTests(unittest.TestCase):
                 finally:
                     center.close()
             finally:
+                connection.close()
+
+    def test_batch_replacement_confirms_once_skips_invalid_and_continues_after_failure(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="vm-batch-replace-") as directory:
+            base = Path(directory)
+            root = base / "library"
+            root.mkdir()
+            for name in ("alpha", "beta", "gamma", "delta"):
+                (root / f"{name}.mp4").write_bytes(name.encode())
+            paths = AppPaths(base / "data")
+            library_id = open_library(paths, root, create=True).marker.library_id
+            connection = open_database(paths.database, paths.backups)
+            center = None
+            try:
+                synchronize(connection, library_id, root, scan_library(root, library_id))
+                videos = {row["file_name"].split(".")[0]: row["id"] for row in connection.execute("SELECT id,file_name FROM videos")}
+                identifiers = {}
+                old = queue_video(connection, root, library_id, videos["alpha"], Profile())
+                update_job(connection, old, status="completed", finished_at="2026-01-01T00:00:00Z")
+                for number, name in enumerate(("alpha", "beta", "gamma", "delta")):
+                    identifier = queue_video(connection, root, library_id, videos[name], Profile())
+                    identifiers[name] = identifier
+                    output = f"{name}_compressed.mp4"
+                    if name != "gamma":
+                        (root / output).write_bytes(b"compressed copy")
+                    update_job(connection, identifier, status="completed", output_rel_path=output,
+                               finished_at=f"2026-10-19T00:00:0{4-number}Z",
+                               sample_quality_details_json=json.dumps({"hdr_or_rotation": name == "beta"}))
+                center = CompressionCenter(paths, connection, root, library_id, [])
+                center.cap_thread.wait(30000)
+                self.app.processEvents()
+                notices = QSignalSpy(center.job_notice)
+                self.assertTrue(center.confirm_all_replace_button.isEnabled())
+                calls = []
+
+                def replace(worker_connection, _root, _cache, identifier, *_args):
+                    calls.append(identifier)
+                    if identifier == identifiers["alpha"]:
+                        raise RuntimeError("test replacement validation failure")
+                    update_job(worker_connection, identifier, status="replaced")
+                    with worker_connection:
+                        worker_connection.execute(
+                            "INSERT INTO compression_replacements(job_id,source_rel_path,output_rel_path,preserved_rel_path,state,updated_at) "
+                            "VALUES (?,?,?,?,?,?)", (identifier, "delta.mp4", "delta_compressed.mp4", "saved.mp4", "complete", "2026-10-19"))
+
+                with patch("videomanager.ui.compression_center.replace_original", side_effect=replace), \
+                     patch.object(QMessageBox, "question", return_value=QMessageBox.Yes) as question:
+                    center.confirm_all_replace()
+                    deadline = time.monotonic() + 15
+                    while center._batch_replace_total and time.monotonic() < deadline:
+                        QTest.qWait(20)
+                    self.assertEqual(center._batch_replace_total, 0)
+                    question.assert_called_once()
+                self.assertEqual(calls, [identifiers["alpha"], identifiers["delta"]])
+                self.assertEqual(center._batch_replace_success, 1)
+                self.assertEqual(len(center._batch_replace_errors), 3)
+                self.assertIn("成功 1/4", notices.at(notices.count() - 1)[0])
+                for name in videos:
+                    self.assertEqual((root / f"{name}.mp4").read_bytes(), name.encode())
+            finally:
+                if center is not None:
+                    center._batch_replace_queue.clear()
+                    center._batch_replace_total = 0
+                    center._batch_replace_timer.stop()
+                    if center.replacement_worker:
+                        center.replacement_worker.wait(10000)
+                        self.app.processEvents()
+                    center.close()
                 connection.close()
 
 
