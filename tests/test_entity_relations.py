@@ -55,6 +55,8 @@ class EntityRelationTests(unittest.TestCase):
                 panel.people.set_selected({person})
                 panel.studios.set_selected({studio})
                 self.assertTrue(panel.save_current())
+                self.assertIn(f'href="person:{person}"', panel.entity_summary.text())
+                self.assertIn("片商甲", panel.entity_summary.text())
                 self.assertEqual(repo.video_tag_ids(connection, ids[0]), {tag_a})
                 panel.set_batch(ids)
                 panel.people.set_selected({person})

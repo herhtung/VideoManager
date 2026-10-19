@@ -428,6 +428,7 @@ class MainWindow(QMainWindow):
         center_layout.addWidget(self.browser, 1)
         splitter.addWidget(center)
         self.details = DetailsPanel(self.connection)
+        self.details.entity_requested.connect(self.filter_by_entity)
         self.details.set_library(self.root, self.library_id)
         self.details.setMinimumWidth(220)
         self.details.set_video(None)
@@ -1853,6 +1854,12 @@ class MainWindow(QMainWindow):
                 self.refresh_videos()
             except ValueError as exc:
                 QMessageBox.warning(self, "篩選值錯誤", str(exc))
+
+    def filter_by_entity(self, entity_type: str, identifier: str) -> None:
+        if entity_type not in {"person", "studio"}:
+            return
+        self.advanced_filters = {"person_ids" if entity_type == "person" else "studio_ids": [identifier]}
+        self.refresh_videos()
 
     def show_statistics(self) -> None:
         if self.library_id is None:

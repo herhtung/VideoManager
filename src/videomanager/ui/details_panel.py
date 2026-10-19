@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from html import escape
 from pathlib import Path
 
 from PySide6.QtCore import Signal
@@ -55,6 +56,7 @@ class DetailsPanel(QWidget):
     saved = Signal()
     completed = Signal()
     skipped = Signal()
+    entity_requested = Signal(str, str)
 
     def __init__(self, connection: sqlite3.Connection, parent=None) -> None:
         super().__init__(parent)
@@ -82,6 +84,11 @@ class DetailsPanel(QWidget):
         self.status = QLabel("尚未選擇影片")
         self.file_info = QLabel()
         self.file_info.setWordWrap(True)
+        self.entity_summary = QLabel("人物／片商：無")
+        self.entity_summary.setOpenExternalLinks(False)
+        self.entity_summary.linkActivated.connect(self._entity_link_activated)
+        self.people.list.itemChanged.connect(lambda _item: self._refresh_entity_summary())
+        self.studios.list.itemChanged.connect(lambda _item: self._refresh_entity_summary())
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -116,6 +123,7 @@ class DetailsPanel(QWidget):
         status_row.addWidget(self.return_button)
         layout.addLayout(status_row)
         layout.addWidget(self.file_info)
+        layout.addWidget(self.entity_summary)
         buttons = QHBoxLayout()
         self.save_button = QPushButton("儲存")
         self.save_button.clicked.connect(lambda: self.save_current())
@@ -163,6 +171,7 @@ class DetailsPanel(QWidget):
             self.status.setText("尚未選擇影片")
             self.return_button.hide()
             self.file_info.clear()
+            self._refresh_entity_summary()
             self._capture_state()
             return
         row = repo.video_by_id(self.connection, video_id)
@@ -183,6 +192,7 @@ class DetailsPanel(QWidget):
         self.people.reload()
         self.studios.set_selected(repo.video_entity_ids(self.connection, video_id, "studio"))
         self.studios.reload()
+        self._refresh_entity_summary()
         self._capture_state()
 
     def set_batch(self, video_ids: list[str]) -> None:
@@ -228,7 +238,24 @@ class DetailsPanel(QWidget):
         self.people.reload()
         self.studios.set_selected(shared_studios)
         self.studios.reload()
+        self._refresh_entity_summary()
         self._capture_state()
+
+    def _refresh_entity_summary(self) -> None:
+        links = []
+        for picker, entity_type, label in ((self.people, "person", "人物"), (self.studios, "studio", "片商")):
+            selected = picker.selected_ids()
+            if not selected:
+                continue
+            names = {row["id"]: row["name"] for row in repo.list_entities(self.connection, entity_type)}
+            links.extend(f'<a href="{entity_type}:{identifier}">{escape(names[identifier])}</a>'
+                         for identifier in sorted(selected) if identifier in names)
+        self.entity_summary.setText("人物／片商：" + ("、".join(links) if links else "無") + "（點名稱查看相關影片）")
+
+    def _entity_link_activated(self, url: str) -> None:
+        entity_type, separator, identifier = url.partition(":")
+        if separator and entity_type in {"person", "studio"}:
+            self.entity_requested.emit(entity_type, identifier)
 
     def _form_state(self) -> tuple:
         return (self.video_id, self.group_id, tuple(self.batch_ids), self.title.text(), self.rating.value(),
