@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from videomanager.ui.tag_picker import TagPicker
+from videomanager.ui.entity_picker import EntityPicker
 
 
 class FilterDialog(QDialog):
@@ -43,6 +44,18 @@ class FilterDialog(QDialog):
             column.addWidget(picker, 1)
             tag_columns.addLayout(column, 1)
         layout.addLayout(tag_columns, 3)
+
+        entity_row = QHBoxLayout()
+        self.person_filter = EntityPicker(connection, "person")
+        self.studio_filter = EntityPicker(connection, "studio")
+        self.person_filter.set_selected(set(current.get("person_ids", [])))
+        self.studio_filter.set_selected(set(current.get("studio_ids", [])))
+        for label, picker in (("人物", self.person_filter), ("片商", self.studio_filter)):
+            column = QVBoxLayout()
+            column.addWidget(QLabel(label))
+            column.addWidget(picker)
+            entity_row.addLayout(column, 1)
+        layout.addLayout(entity_row, 1)
 
         other = QLabel("其他條件")
         other.setStyleSheet("font-size: 15px; font-weight: 700; color: #e1f4f0; margin-top: 7px;")
@@ -94,7 +107,7 @@ class FilterDialog(QDialog):
         layout.addWidget(buttons)
 
     def clear_all(self) -> None:
-        for picker in (self.tag_all, self.tag_any, self.tag_not):
+        for picker in (self.tag_all, self.tag_any, self.tag_not, self.person_filter, self.studio_filter):
             picker.set_selected(set())
             picker.search.clear()
             picker.reload()
@@ -143,6 +156,10 @@ class FilterDialog(QDialog):
             if widget.text().strip():
                 result[key] = round(datetime.fromisoformat(self._utc_date(widget.text(), end=end)).timestamp() * 1e9)
         for picker, key in ((self.tag_all, "tag_all"), (self.tag_any, "tag_any"), (self.tag_not, "tag_not")):
+            selected = sorted(picker.selected_ids())
+            if selected:
+                result[key] = selected
+        for picker, key in ((self.person_filter, "person_ids"), (self.studio_filter, "studio_ids")):
             selected = sorted(picker.selected_ids())
             if selected:
                 result[key] = selected

@@ -7,13 +7,14 @@ from pathlib import Path
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
+    QCheckBox, QComboBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
     QPushButton, QTextEdit,
     QVBoxLayout, QWidget,
 )
 
 from videomanager.db import repository as repo
 from videomanager.ui.tag_picker import TagCreateDialog, TagPicker
+from videomanager.ui.entity_picker import EntityPicker
 
 
 class StarRating(QWidget):
@@ -73,6 +74,11 @@ class DetailsPanel(QWidget):
         self.notes = QTextEdit()
         self.notes.setMaximumHeight(100)
         self.tags = TagPicker(connection)
+        self.people = EntityPicker(connection, "person")
+        self.studios = EntityPicker(connection, "studio")
+        self.batch_operation = QComboBox()
+        self.batch_operation.addItems(["批次新增關聯", "批次移除關聯"])
+        self.batch_operation.hide()
         self.status = QLabel("尚未選擇影片")
         self.file_info = QLabel()
         self.file_info.setWordWrap(True)
@@ -95,6 +101,11 @@ class DetailsPanel(QWidget):
         tag_header.addWidget(add_tag)
         layout.addLayout(tag_header)
         layout.addWidget(self.tags, 1)
+        layout.addWidget(QLabel("人物（雙擊可修改名稱）"))
+        layout.addWidget(self.people, 1)
+        layout.addWidget(QLabel("片商（雙擊可修改名稱）"))
+        layout.addWidget(self.studios, 1)
+        layout.addWidget(self.batch_operation)
         status_row = QHBoxLayout()
         status_row.addWidget(self.status)
         status_row.addStretch()
@@ -126,6 +137,7 @@ class DetailsPanel(QWidget):
             self.set_video(self.video_id)
 
     def set_video(self, video_id: str | None) -> None:
+        self.batch_operation.hide()
         self.batch_ids = []
         self.group_id = None
         self.video_id = video_id
@@ -137,7 +149,11 @@ class DetailsPanel(QWidget):
         enabled = video_id is not None
         self.setEnabled(enabled)
         self.tags.connection = self.connection
+        self.people.connection = self.connection
+        self.studios.connection = self.connection
         self.tags.set_selected(set())
+        self.people.set_selected(set())
+        self.studios.set_selected(set())
         if video_id is None:
             self.title.clear()
             self.rating.setValue(0)
@@ -163,23 +179,30 @@ class DetailsPanel(QWidget):
         self.file_info.setText(f"{row['relative_path']}\n{row['width'] or '?'} × {row['height'] or '?'} · {row['video_codec'] or '?'}")
         self.tags.set_selected(repo.video_tag_ids(self.connection, video_id))
         self.tags.reload()
+        self.people.set_selected(repo.video_entity_ids(self.connection, video_id, "person"))
+        self.people.reload()
+        self.studios.set_selected(repo.video_entity_ids(self.connection, video_id, "studio"))
+        self.studios.reload()
         self._capture_state()
 
     def set_batch(self, video_ids: list[str]) -> None:
-        """Only tag empty, ungrouped videos through the right pane."""
+        """Add or remove selected metadata without replacing other video data."""
         self.set_video(None)
         self.batch_ids = list(dict.fromkeys(video_ids))
         self.setEnabled(True)
         self.title_label.setText("批次標籤")
-        self.title.setText(f"已選 {len(self.batch_ids)} 部未標記影片")
+        self.title.setText(f"已選 {len(self.batch_ids)} 部影片")
         for widget in (self.title, self.rating, self.favorite, self.recorded, self.notes,
                        self.done_button, self.skip_button):
             widget.setEnabled(False)
         self.tags.set_selected(set())
+        self.people.set_selected(set())
+        self.studios.set_selected(set())
+        self.batch_operation.show()
         self.tags.reload()
-        self.status.setText("批次加入標籤")
-        self.file_info.setText("按標籤後選「套用標籤」；影片名稱及其他資料不會改變。")
-        self.save_button.setText("套用標籤")
+        self.status.setText("批次新增／移除關聯")
+        self.file_info.setText("選取要操作的標籤、人物或片商；預設新增，切換可移除。未選欄位不變。")
+        self.save_button.setText("套用關聯")
         self._capture_state()
 
     def set_group(self, group_id: str) -> None:
@@ -199,12 +222,19 @@ class DetailsPanel(QWidget):
         shared_tags = set().union(*(repo.video_tag_ids(self.connection, part) for part in members))
         self.tags.set_selected(shared_tags)
         self.tags.reload()
+        shared_people = set.intersection(*(repo.video_entity_ids(self.connection, part, "person") for part in members))
+        shared_studios = set.intersection(*(repo.video_entity_ids(self.connection, part, "studio") for part in members))
+        self.people.set_selected(shared_people)
+        self.people.reload()
+        self.studios.set_selected(shared_studios)
+        self.studios.reload()
         self._capture_state()
 
     def _form_state(self) -> tuple:
         return (self.video_id, self.group_id, tuple(self.batch_ids), self.title.text(), self.rating.value(),
                 self.favorite.isChecked(), self.recorded.text(), self.notes.toPlainText(),
-                frozenset(self.tags.selected_ids()))
+                frozenset(self.tags.selected_ids()), frozenset(self.people.selected_ids()),
+                frozenset(self.studios.selected_ids()), self.batch_operation.currentIndex())
 
     def _capture_state(self) -> None:
         self._saved_state = self._form_state()
@@ -229,17 +259,27 @@ class DetailsPanel(QWidget):
             placeholders = ",".join("?" for _ in ids)
             eligible = self.connection.execute(
                 f"""SELECT COUNT(*) FROM videos v WHERE v.id IN ({placeholders})
-                    AND v.deleted_at IS NULL AND v.missing_since IS NULL
-                    AND NOT EXISTS (SELECT 1 FROM video_tags vt WHERE vt.video_id = v.id)""", ids,
+                    AND v.deleted_at IS NULL AND v.missing_since IS NULL""", ids,
             ).fetchone()[0]
             if eligible != len(ids):
-                QMessageBox.warning(self, "無法批次套用", "選取影片已有標籤或已不可用，請重新選取。")
+                QMessageBox.warning(self, "無法批次套用", "選取影片已不可用，請重新選取。")
                 return False
             with self.connection:
-                self.connection.executemany(
-                    "INSERT OR IGNORE INTO video_tags(video_id, tag_id) VALUES (?, ?)",
-                    ((video_id, tag_id) for video_id in ids for tag_id in self.tags.selected_ids()),
-                )
+                for table, id_column, selected in (
+                    ("video_tags", "tag_id", self.tags.selected_ids()),
+                    ("video_entities", "entity_id", self.people.selected_ids() | self.studios.selected_ids()),
+                ):
+                    verb = "INSERT OR IGNORE INTO" if self.batch_operation.currentIndex() == 0 else "DELETE FROM"
+                    if self.batch_operation.currentIndex() == 0:
+                        self.connection.executemany(
+                            f"{verb} {table}(video_id,{id_column}) VALUES (?,?)",
+                            ((identifier, value) for identifier in ids for value in selected),
+                        )
+                    else:
+                        self.connection.executemany(
+                            f"{verb} {table} WHERE video_id=? AND {id_column}=?",
+                            ((identifier, value) for identifier in ids for value in selected),
+                        )
             self._capture_state()
             self.saved.emit()
             return True
@@ -278,6 +318,7 @@ class DetailsPanel(QWidget):
                 status=status,
                 tag_ids=self.tags.selected_ids(),
                 group_cover=self.group_id is not None,
+                entity_ids=self.people.selected_ids() | self.studios.selected_ids(),
             )
         except (sqlite3.Error, ValueError, OSError) as exc:
             QMessageBox.critical(self, "儲存失敗", str(exc))

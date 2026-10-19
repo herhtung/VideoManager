@@ -959,9 +959,7 @@ class MainWindow(QMainWindow):
         batch_ids = [index.data(Qt.UserRole) for index in indexes if index.isValid()
                      and not self.model.rows[index.row()].get("_group_cover")
                      and not self.model.rows[index.row()].get("group_id")]
-        if len(batch_ids) > 1 and len(batch_ids) == len(indexes) and all(
-            not repo.video_tag_ids(self.connection, video_id) for video_id in batch_ids
-        ):
+        if len(batch_ids) > 1 and len(batch_ids) == len(indexes):
             self.details.set_batch(batch_ids)
             return
         video_id = self.selected_video_id()

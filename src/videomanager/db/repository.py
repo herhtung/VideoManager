@@ -91,6 +91,12 @@ def list_videos(
     for tag_id in filters.get("tag_all", []):
         conditions.append("EXISTS (SELECT 1 FROM video_tags vt WHERE vt.video_id = v.id AND vt.tag_id = ?)")
         params.append(tag_id)
+    for entity_id in filters.get("person_ids", []):
+        conditions.append("EXISTS (SELECT 1 FROM video_entities ve JOIN entities e ON e.id=ve.entity_id WHERE ve.video_id=v.id AND e.type='person' AND ve.entity_id=?)")
+        params.append(entity_id)
+    for entity_id in filters.get("studio_ids", []):
+        conditions.append("EXISTS (SELECT 1 FROM video_entities ve JOIN entities e ON e.id=ve.entity_id WHERE ve.video_id=v.id AND e.type='studio' AND ve.entity_id=?)")
+        params.append(entity_id)
     if any_ids := filters.get("tag_any"):
         conditions.append(f"EXISTS (SELECT 1 FROM video_tags vt WHERE vt.video_id = v.id AND vt.tag_id IN ({','.join('?' for _ in any_ids)}))")
         params.extend(any_ids)
@@ -143,6 +149,7 @@ def save_video_details(
     connection: sqlite3.Connection, video_id: str, *, title: str, notes: str,
     rating: int, is_favorite: bool, recorded_at: str | None, status: str,
     tag_ids: Iterable[str], group_cover: bool = False,
+    entity_ids: Iterable[str] | None = None,
 ) -> None:
     """Save a part's title and the metadata shared by its whole video group atomically."""
     title = title.strip()
@@ -175,6 +182,11 @@ def save_video_details(
             "INSERT INTO video_tags(video_id, tag_id) VALUES (?, ?)",
             ((member_id, tag_id) for member_id in members for tag_id in tags),
         )
+        if entity_ids is not None:
+            entities = set(entity_ids)
+            connection.executemany("DELETE FROM video_entities WHERE video_id = ?", ((member_id,) for member_id in members))
+            connection.executemany("INSERT INTO video_entities(video_id, entity_id) VALUES (?, ?)",
+                                   ((member_id, entity_id) for member_id in members for entity_id in entities))
 
 
 def update_video(connection: sqlite3.Connection, video_id: str, **changes: object) -> None:
@@ -391,6 +403,40 @@ def delete_category(connection: sqlite3.Connection, category_id: str) -> Categor
 
 def video_tag_ids(connection: sqlite3.Connection, video_id: str) -> set[str]:
     return {row[0] for row in connection.execute("SELECT tag_id FROM video_tags WHERE video_id = ?", (video_id,))}
+
+
+def list_entities(connection: sqlite3.Connection, entity_type: str) -> list[sqlite3.Row]:
+    if entity_type not in {"person", "studio"}:
+        raise ValueError("Invalid entity type")
+    return connection.execute("SELECT id, type, name FROM entities WHERE type=? ORDER BY name COLLATE NOCASE", (entity_type,)).fetchall()
+
+
+def create_entity(connection: sqlite3.Connection, entity_type: str, name: str) -> str:
+    name = name.strip()
+    if entity_type not in {"person", "studio"} or not name:
+        raise ValueError("請輸入有效名稱。")
+    identifier = str(uuid4())
+    with connection:
+        connection.execute("INSERT INTO entities(id,type,name) VALUES(?,?,?)", (identifier, entity_type, name))
+    return identifier
+
+
+def rename_entity(connection: sqlite3.Connection, entity_id: str, name: str) -> None:
+    name = name.strip()
+    if not name:
+        raise ValueError("名稱不可空白。")
+    with connection:
+        if connection.execute("UPDATE entities SET name=? WHERE id=?", (name, entity_id)).rowcount != 1:
+            raise ValueError("找不到此項目。")
+
+
+def video_entity_ids(connection: sqlite3.Connection, video_id: str, entity_type: str | None = None) -> set[str]:
+    query = "SELECT ve.entity_id FROM video_entities ve JOIN entities e ON e.id=ve.entity_id WHERE ve.video_id=?"
+    params: tuple = (video_id,)
+    if entity_type:
+        query += " AND e.type=?"
+        params += (entity_type,)
+    return {row[0] for row in connection.execute(query, params)}
 
 
 def video_category_ids(connection: sqlite3.Connection, video_id: str) -> set[str]:
