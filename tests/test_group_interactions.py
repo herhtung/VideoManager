@@ -105,6 +105,7 @@ class GroupInteractionTests(unittest.TestCase):
                     self.assertEqual(len(groups), 1)
                     self.assertEqual(groups[0]["part_count"], 2)
                     self.assertTrue((root / groups[0]["folder_rel_path"] / "one.mp4").is_file())
+                    window.group_section_button.click()
                     self.assertEqual(window.model.rowCount(), 1)
                     self.assertTrue(window.model.rows[0]["_group_cover"])
                     self.assertIsNone(window.selected_video_id())
@@ -140,6 +141,7 @@ class GroupInteractionTests(unittest.TestCase):
                     with patch.object(QMessageBox, "question", return_value=QMessageBox.Yes):
                         window.group_dissolve_button.click()
                     self.assertEqual(list_groups(window.connection, marker.library_id), [])
+                    window.single_section_button.click()
                     self.assertEqual(window.model.rowCount(), 2)
                     self.assertTrue(all(not row.get("group_id") for row in window.model.rows))
                     self.assertEqual(len(list(root.rglob("*.mp4"))), 2)

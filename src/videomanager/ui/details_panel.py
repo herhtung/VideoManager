@@ -158,8 +158,8 @@ class DetailsPanel(QWidget):
         self.favorite.setChecked(bool(row["is_favorite"]))
         self.recorded.setText(row["recorded_at"] or "")
         self.notes.setPlainText(row["notes"] or "")
-        self.status.setText({"unprocessed": "待整理", "in_progress": "整理中", "done": "已整理"}[row["status"]])
-        self.return_button.setVisible(row["status"] != "unprocessed")
+        self.status.setText("已整理" if row["status"] == "done" else "待整理")
+        self.return_button.setVisible(row["status"] == "done")
         self.file_info.setText(f"{row['relative_path']}\n{row['width'] or '?'} × {row['height'] or '?'} · {row['video_codec'] or '?'}")
         self.tags.set_selected(repo.video_tag_ids(self.connection, video_id))
         self.tags.reload()
@@ -267,7 +267,7 @@ class DetailsPanel(QWidget):
                 )
                 return False
         status = ("unprocessed" if return_to_queue else "done" if complete else
-                  "in_progress" if row["status"] == "unprocessed" else row["status"])
+                  "done" if row["status"] == "done" else "unprocessed")
         try:
             repo.save_video_details(
                 self.connection, self.video_id, title=title,
@@ -288,9 +288,9 @@ class DetailsPanel(QWidget):
         else:
             self.file_info.setText(f"{repo.video_by_id(self.connection, self.video_id)['relative_path']}\n"
                                    f"{row['width'] or '?'} × {row['height'] or '?'} · {row['video_codec'] or '?'}")
-        status_text = {"in_progress": "整理中", "done": "已整理"}.get(status, "待整理")
+        status_text = "已整理" if status == "done" else "待整理"
         self.status.setText(f"影片組 · {count} 段 · {status_text}" if self.group_id else status_text)
-        self.return_button.setVisible(status != "unprocessed")
+        self.return_button.setVisible(status == "done")
         self._capture_state()
         self.saved.emit()
         return True

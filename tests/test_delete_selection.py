@@ -129,6 +129,7 @@ class DeleteSelectionTests(unittest.TestCase):
             with patch.object(MainWindow, "start_scan"):
                 window = MainWindow(paths)
             try:
+                window.group_section_button.click()
                 cover_row = next(index for index, row in enumerate(window.model.rows)
                                  if row.get("_group_cover"))
                 window.browser.selectionModel().select(

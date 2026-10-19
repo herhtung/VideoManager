@@ -1652,8 +1652,10 @@ class CompressionCenter(QDialog):
                 relative = json.loads(samples[0])["sample_rel_path"]
         if relative and (self.root / relative).is_file():
             self.play_path_requested.emit(row["video_id"], str(self.root / relative))
+        elif which == "sample":
+            notify_information(self, "取樣片段已清除", "試壓縮取樣檔已不在磁碟上；原片及正式壓縮副本不受影響。")
         else:
-            notify_information(self, "檔案不可用", "影片庫離線，或這份副本／取樣已不在磁碟上。")
+            notify_information(self, "檔案不可用", "原片或壓縮副本已不在預期位置；請檢查影片庫磁碟。")
 
     def confirm_replace(self) -> None:
         identifier = self._selected_id()
@@ -1667,8 +1669,12 @@ class CompressionCenter(QDialog):
                 or self._worker_uses_video(self.worker, row["video_id"])):
             return
         details = json.loads(row["sample_quality_details_json"] or "{}")
-        if details.get("hdr_or_rotation") or details.get("extra_streams"):
-            QMessageBox.warning(self, "無法安全替換", "來源含特殊色彩／角度或額外串流；請保留壓縮副本供比較。")
+        if details.get("hdr_or_rotation"):
+            QMessageBox.warning(self, "無法安全替換", "來源含特殊色彩或旋轉資訊；請保留壓縮副本供比較。")
+            return
+        if not (self.root / row["source_rel_path"]).is_file() or not (
+                row["output_rel_path"] and (self.root / row["output_rel_path"]).is_file()):
+            notify_information(self, "檔案不可用", "原片或壓縮副本已不在預期位置，無法替換。")
             return
         message = (f"原片：{self.root / row['source_rel_path']}（{_size(row['source_size'])}）\n"
                    f"副本：{self.root / row['output_rel_path']}（{_size(row['actual_size'])}）\n"
@@ -1676,6 +1682,8 @@ class CompressionCenter(QDialog):
                    "確認後，原片會移至同磁碟的 .videomanager/compression-originals 保留區，"
                    "壓縮版才會放到原路徑。最多保留最近 3 部原片，可從歷史紀錄還原；"
                    "第 4 部替換成功時會清除最舊的保留原片。請先自行播放比較。")
+        if details.get("extra_streams"):
+            message += "\n\n原片含附加資料流；替換前會嘗試保留並驗證，失敗時兩份影片均不會被替換。"
         if QMessageBox.question(self, "確認替換原片", message,
                                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
             return

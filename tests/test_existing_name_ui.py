@@ -110,6 +110,7 @@ class ExistingNameUiTests(unittest.TestCase):
             with patch.object(MainWindow, "start_scan"):
                 window = MainWindow(paths)
                 try:
+                    window.group_section_button.click()
                     with patch.object(ExistingNameDialog, "exec", return_value=QDialog.Accepted), \
                          patch.object(QMessageBox, "information"):
                         window.scan_existing_video_names()

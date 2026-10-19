@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "0.2.12"
+  #define AppVersion "0.2.13"
 #endif
 #ifndef AppFiles
   #define AppFiles "..\dist-local\VideoManager"

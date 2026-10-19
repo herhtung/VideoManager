@@ -10,7 +10,7 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel
 
 from videomanager.config import AppPaths
 from videomanager.db.database import open_database
@@ -57,6 +57,7 @@ class StatsDialogTests(unittest.TestCase):
                 self.assertEqual(readable_size(3 * 1024**3), "3.0 GB")
                 dialog = StatsDialog(connection, "lib")
                 try:
+                    self.assertFalse(any("整理中" in label.text() for label in dialog.findChildren(QLabel)))
                     self.assertEqual(dialog.tags.topLevelItem(0).child(0).text(2), "2 / 2 部")
                     self.assertEqual(dialog.tags.topLevelItem(0).child(0).data(1, Qt.UserRole), (2, 2))
                     dialog.search.setText("找不到")

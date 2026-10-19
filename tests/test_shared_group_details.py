@@ -59,6 +59,7 @@ class SharedGroupDetailsTests(unittest.TestCase):
             try:
                 window.show()
                 self.app.processEvents()
+                window.group_section_button.click()
                 window.search.setText("part-one")
                 window.refresh_videos()
                 self.assertEqual(window.model.rowCount(), 1)

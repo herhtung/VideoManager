@@ -121,6 +121,9 @@ class MainWindow(QMainWindow):
         self._large_library = False
         self._last_preview_refresh = 0.0
         self._last_browser_nav_key: str | None = None
+        self._browser_section = "single"
+        self._player_browser_state: tuple[str, str | None, int] | None = None
+        self._recycle_return_nav_key: str | None = None
         self._browser_refresh_serial = 0
         self._refreshing_browser = False
         self.advanced_filters: dict = {}
@@ -244,7 +247,7 @@ class MainWindow(QMainWindow):
             ("管理標籤", self.manage_metadata),
             ("批次加／移除標籤", self.batch_relations),
             ("將選取影片建立為一組", self.group_selected),
-            ("更換管理根目錄", self.reset_library_root),
+            ("影片回收桶", self.show_trash_page),
             ("設定", self.show_settings),
         ):
             button = QPushButton(label)
@@ -343,9 +346,23 @@ class MainWindow(QMainWindow):
         actions.addWidget(self.compress_button)
         actions.addWidget(self.recycle_button)
         center_layout.addLayout(actions)
+        section_row = QHBoxLayout()
+        self.section_modes = QButtonGroup(self)
+        self.section_modes.setExclusive(True)
+        self.single_section_button = QPushButton("單部影片")
+        self.group_section_button = QPushButton("影片組")
+        for button, section in ((self.single_section_button, "single"),
+                                (self.group_section_button, "group")):
+            button.setObjectName("importMode")
+            button.setCheckable(True)
+            self.section_modes.addButton(button)
+            button.clicked.connect(lambda _checked=False, mode=section: self._set_browser_section(mode))
+            section_row.addWidget(button)
+        self.single_section_button.setChecked(True)
         self.summary = QLabel()
         self.summary.setObjectName("sectionLabel")
-        center_layout.addWidget(self.summary)
+        section_row.addWidget(self.summary, 1)
+        center_layout.addLayout(section_row)
         self.group_breadcrumb = QWidget()
         breadcrumb_layout = QHBoxLayout(self.group_breadcrumb)
         breadcrumb_layout.setContentsMargins(0, 0, 0, 0)
@@ -429,19 +446,18 @@ class MainWindow(QMainWindow):
         self.main_stack.addWidget(self.trash_page)
         self.library_task_strip = QWidget()
         task_layout = QHBoxLayout(self.library_task_strip)
-        task_layout.setContentsMargins(12, 3, 12, 3)
-        task_layout.setSpacing(8)
+        task_layout.setContentsMargins(0, 0, 0, 0)
+        task_layout.setSpacing(5)
         self.library_task_label = QLabel("搬入與縮圖：目前沒有工作")
         self.library_task_label.setMinimumWidth(0)
+        self.library_task_label.setMaximumWidth(310)
         self.library_task_progress = QProgressBar()
-        self.library_task_progress.setMinimumWidth(90)
-        self.library_task_progress.setMaximumWidth(220)
+        self.library_task_progress.setFixedWidth(95)
         self.library_task_progress.setRange(0, 100)
         self.library_task_progress.setValue(0)
         self.library_task_progress.setFormat("待命")
-        task_layout.addWidget(self.library_task_label, 1)
+        task_layout.addWidget(self.library_task_label)
         task_layout.addWidget(self.library_task_progress)
-        shell_layout.addWidget(self.library_task_strip)
         shell_layout.addWidget(self.main_stack, 1)
         self.setCentralWidget(shell)
         self.setAcceptDrops(True)
@@ -458,6 +474,7 @@ class MainWindow(QMainWindow):
         self.compression_progress.clicked.connect(self.open_compression_center)
         self.compression_progress.hide()
         self.statusBar().addPermanentWidget(self.compression_progress)
+        self.statusBar().addPermanentWidget(self.library_task_strip)
         self.notification_button = QPushButton("通知")
         self.notification_button.setObjectName("statusAction")
         self.notification_button.clicked.connect(self.show_notification_center)
@@ -584,13 +601,6 @@ class MainWindow(QMainWindow):
     def _navigation_changed(self, current, previous) -> None:
         current_key = current.data(Qt.UserRole) if current else "all"
         previous_key = previous.data(Qt.UserRole) if previous else "all"
-        if current_key == "trash":
-            self.navigation.blockSignals(True)
-            if previous is not None:
-                self.navigation.setCurrentItem(previous)
-            self.navigation.blockSignals(False)
-            self.show_trash_page()
-            return
         entering_group = current_key.startswith("group:")
         leaving_group = previous_key.startswith("group:") and not entering_group
         if entering_group:
@@ -678,6 +688,8 @@ class MainWindow(QMainWindow):
             return
         if self._nav_key() == f"group:{group_id}":
             self._select_nav_key(self._return_nav_key) or self._select_nav_key("all")
+        self._browser_section = "single"
+        self.single_section_button.setChecked(True)
         self.refresh_navigation()
         self.refresh_videos()
         self.statusBar().showMessage("已解散影片組；影片與檔案均保留。", 5000)
@@ -717,16 +729,11 @@ class MainWindow(QMainWindow):
                 (self.library_id,),
             )
             counts = {row[0]: row[1] for row in rows}
-        trash_count = self.connection.execute(
-            """SELECT COUNT(*) FROM trash_entries t JOIN videos v ON v.id=t.video_id
-               WHERE v.library_id=?""", (self.library_id,),
-        ).fetchone()[0] if self.library_id else 0
         items = [
-            ("unprocessed", f"待整理 ({counts.get('unprocessed', 0)})"),
-            ("in_progress", f"整理中 ({counts.get('in_progress', 0)})"),
-            ("all", "全部影片"), ("done", f"已整理 ({counts.get('done', 0)})"),
+            ("all", "全部影片"),
+            ("unprocessed", f"待整理 ({counts.get('unprocessed', 0) + counts.get('in_progress', 0)})"),
+            ("done", f"已整理 ({counts.get('done', 0)})"),
             ("favorite", "收藏"), ("missing", "待清理"),
-            ("trash", f"程式回收桶 ({trash_count})"),
         ]
         items += [(f"tag:{row['id']}", f"標籤 › {row['group_name']} › {row['name']}")
                   for row in repo.list_tags(self.connection)]
@@ -740,13 +747,13 @@ class MainWindow(QMainWindow):
             if key == selected:
                 self.navigation.setCurrentItem(item)
         if self.navigation.currentItem() is None and self.navigation.count():
-            self.navigation.setCurrentRow(2)
+            self.navigation.setCurrentRow(0)
         self.navigation.blockSignals(False)
 
     def _effective_filters(self) -> dict:
         result = dict(self.advanced_filters)
         key = self._nav_key()
-        if key in {"unprocessed", "in_progress", "done"}:
+        if key in {"unprocessed", "done"}:
             result["status"] = key
         elif key == "favorite":
             result["favorite"] = True
@@ -759,7 +766,10 @@ class MainWindow(QMainWindow):
         elif key.startswith("saved:"):
             row = self.connection.execute("SELECT filter_json FROM saved_filters WHERE id = ?", (key.split(":", 1)[1],)).fetchone()
             if row:
-                result.update(json.loads(row[0]))
+                saved = json.loads(row[0])
+                if saved.get("status") == "in_progress":
+                    saved["status"] = "unprocessed"
+                result.update(saved)
         if self.search.text().strip():
             result["text"] = self.search.text().strip()
         return result
@@ -774,7 +784,8 @@ class MainWindow(QMainWindow):
         if selected_group is None:
             selected_group = self.details.group_id
         nav_key = self._nav_key()
-        same_view = nav_key == self._last_browser_nav_key
+        view_key = nav_key if nav_key.startswith("group:") else f"{nav_key}:{self._browser_section}"
+        same_view = view_key == self._last_browser_nav_key
         scroll_value = self.browser.verticalScrollBar().value() if same_view else 0
         try:
             rows = repo.list_videos(
@@ -797,16 +808,21 @@ class MainWindow(QMainWindow):
             self.browser.set_folder_title(f"{folder_name} · 分段")
             summary = f"{len(visible_rows)} 段影片"
         else:
-            visible_rows = compact_browser_rows(rows)
-            group_count = sum(bool(row.get("_group_cover")) for row in visible_rows)
+            compact_rows = compact_browser_rows(rows)
+            group_count = sum(bool(row.get("_group_cover")) for row in compact_rows)
+            visible_rows = [row for row in compact_rows if bool(row.get("_group_cover")) ==
+                            (self._browser_section == "group")]
             self.group_breadcrumb.hide()
             self.browser.set_folder_title(None)
-            summary = f"{len(rows)} 部影片 · {group_count} 組" if group_count else f"顯示 {len(rows)} 部影片"
+            summary = (f"{group_count} 組" if self._browser_section == "group" else
+                       f"{len(compact_rows) - group_count} 部影片")
+        self.single_section_button.setVisible(not folder_view)
+        self.group_section_button.setVisible(not folder_view)
         self._refreshing_browser = True
         self.model.set_rows(visible_rows)
-        self._last_browser_nav_key = nav_key
+        self._last_browser_nav_key = view_key
         self.summary.setText(summary + (" · 影片庫離線" if self.root is None else ""))
-        self._update_empty_state(len(rows))
+        self._update_empty_state(len(visible_rows), other_section_has_videos=bool(rows))
         for index, row in enumerate(self.model.rows):
             if row["id"] == selected or (row.get("_group_cover") and row.get("group_id") == selected_group):
                 self.browser.setCurrentIndex(self.model.index(index))
@@ -825,7 +841,13 @@ class MainWindow(QMainWindow):
         self.filter_button.setText(f"篩選（{count}）" if count else "篩選")
         self.clear_filter_button.setEnabled(bool(count or self.search.text()))
 
-    def _update_empty_state(self, visible_count: int) -> None:
+    def _set_browser_section(self, section: str) -> None:
+        if section not in {"single", "group"} or section == self._browser_section:
+            return
+        self._browser_section = section
+        self.refresh_videos()
+
+    def _update_empty_state(self, visible_count: int, *, other_section_has_videos: bool = False) -> None:
         empty = visible_count == 0
         self.empty_state.setVisible(empty)
         self.browser.setVisible(not empty)
@@ -852,6 +874,11 @@ class MainWindow(QMainWindow):
             title, message, button, action = (
                 "正在準備或搬入 MP4", "程式正在尋找影片並分配資料夾。", "取消背景工作", "cancel",
             )
+        elif other_section_has_videos:
+            title, message, button, action = (
+                "這裡沒有影片組" if self._browser_section == "group" else "這裡沒有單部影片",
+                "可按上方另一個按鈕切換查看。", "", "none",
+            )
         elif self.connection.execute(
             "SELECT 1 FROM videos WHERE library_id = ? AND deleted_at IS NULL LIMIT 1", (self.library_id,),
         ).fetchone():
@@ -872,6 +899,7 @@ class MainWindow(QMainWindow):
         self.empty_title.setText(title)
         self.empty_message.setText(message)
         self.empty_button.setText(button)
+        self.empty_button.setVisible(bool(button))
         self._empty_action_kind = action
 
     def _empty_action(self) -> None:
@@ -882,7 +910,7 @@ class MainWindow(QMainWindow):
         elif self._empty_action_kind == "all":
             self.advanced_filters = {}
             self.search.clear()
-            self.navigation.setCurrentRow(2)
+            self._select_nav_key("all")
             self.refresh_videos()
         elif self._empty_action_kind == "import":
             self.import_files()
@@ -1067,6 +1095,9 @@ class MainWindow(QMainWindow):
             return
         if dissolved and self._nav_key() == f"group:{group_id}":
             self._return_nav_key = "all"
+        if dissolved:
+            self._browser_section = "single"
+            self.single_section_button.setChecked(True)
         self.refresh_navigation()
         self.refresh_videos()
         self.statusBar().showMessage("已移出分段。" + ("影片組不足兩段，已解除分組。" if dissolved else ""), 5000)
@@ -1201,11 +1232,9 @@ class MainWindow(QMainWindow):
             self.browser.setCurrentIndex(self.model.index(min(index + 1, self.model.rowCount() - 1)))
 
     def advance_after_complete(self) -> None:
-        index = self.browser.currentIndex().row()
-        self.refresh_navigation()
-        self.refresh_videos()
         if self.model.rowCount():
-            self.browser.setCurrentIndex(self.model.index(min(max(index, 0), self.model.rowCount() - 1)))
+            self.browser.setCurrentIndex(self.model.index(0))
+        QTimer.singleShot(0, lambda: self.browser.verticalScrollBar().setValue(0))
 
     def choose_library(self) -> None:
         if (self.worker and self.worker.isRunning()) or (self.import_worker and self.import_worker.isRunning()) or (
@@ -1654,6 +1683,8 @@ class MainWindow(QMainWindow):
                     ordered, folder_rel_path=folder.relative_to(self.root).as_posix(),
                 )
                 summary += f"\n已建立影片組，共 {len(ordered)} 段。"
+                self._browser_section = "group"
+                self.group_section_button.setChecked(True)
                 self.refresh_navigation()
                 self.refresh_videos()
             except Exception as exc:
@@ -1748,6 +1779,16 @@ class MainWindow(QMainWindow):
             if self.player is not None:
                 return
         self._player_return_widget = self.main_stack.currentWidget()
+        if self._player_return_widget is self.browser_page:
+            index = self.browser.currentIndex()
+            identity = None
+            if index.isValid() and index.row() < len(self.model.rows):
+                row = self.model.rows[index.row()]
+                identity = (f"group:{row['group_id']}" if row.get("_group_cover") else row["id"])
+            self._player_browser_state = (self._nav_key(), identity,
+                                          self.browser.verticalScrollBar().value())
+        else:
+            self._player_browser_state = None
         self.browser.stop_hover()
         player = PlayerView(self.connection, video_id, source, self,
                             segments=segments, embedded=True, read_only=read_only,
@@ -1773,6 +1814,8 @@ class MainWindow(QMainWindow):
         self.player = None
         target = self._player_return_widget
         self._player_return_widget = None
+        browser_state = self._player_browser_state
+        self._player_browser_state = None
         if target is not None and self.main_stack.indexOf(target) >= 0:
             self.main_stack.setCurrentWidget(target)
         else:
@@ -1783,6 +1826,20 @@ class MainWindow(QMainWindow):
             self.statusBar().setVisible(status_visible)
             self._player_chrome_visibility = None
         self.show_selected_details()
+        if target is self.browser_page and browser_state is not None:
+            QTimer.singleShot(0, lambda state=browser_state: self._restore_browser_position(state))
+
+    def _restore_browser_position(self, state: tuple[str, str | None, int]) -> None:
+        nav_key, identity, scroll = state
+        if self.main_stack.currentWidget() is not self.browser_page or self._nav_key() != nav_key:
+            return
+        if identity:
+            for number, row in enumerate(self.model.rows):
+                key = f"group:{row['group_id']}" if row.get("_group_cover") else row["id"]
+                if key == identity:
+                    self.browser.setCurrentIndex(self.model.index(number))
+                    break
+        self.browser.verticalScrollBar().setValue(scroll)
 
     def manage_metadata(self) -> None:
         MetadataDialog(self.connection, self, root=self.root, library_id=self.library_id).exec()
@@ -2102,6 +2159,8 @@ class MainWindow(QMainWindow):
                 self.connection, self.library_id, self.root, paths[ids.index(ordered[0])].stem,
                 ordered, expected_folder=folder,
             )
+            self._browser_section = "group"
+            self.group_section_button.setChecked(True)
             self.refresh_navigation()
             self.refresh_videos()
             self.statusBar().showMessage(f"已建立影片組，共 {len(ordered)} 段。", 5000)
@@ -2161,6 +2220,7 @@ class MainWindow(QMainWindow):
         ) or self._pending_import is not None:
             notify_information(self, "正在搬入", "請等目前的搬入工作完成後再刪除。")
             return
+        self._recycle_return_nav_key = self._nav_key()
         if self.worker and self.worker.isRunning():
             self._pending_recycle_ids = ids
             self._update_recycle_button()
@@ -2215,6 +2275,7 @@ class MainWindow(QMainWindow):
             self.edit_center.refresh_edits()
 
     def _confirm_recycle(self, ids: list[str], *, resume_scan: bool = False) -> None:
+        return_key = self._recycle_return_nav_key or self._nav_key()
         try:
             if self.root is None or self.library_id is None:
                 return
@@ -2278,12 +2339,28 @@ class MainWindow(QMainWindow):
                 except Exception as exc:
                     failed.append(f"{path}: {exc}")
             self.refresh_navigation()
+            if return_key.startswith("group:") and not any(
+                self.navigation.item(number).data(Qt.UserRole) == return_key
+                for number in range(self.navigation.count())
+            ):
+                if self._group_return_filters is not None:
+                    search_text, self.advanced_filters = self._group_return_filters
+                    self.search.blockSignals(True)
+                    self.search.setText(search_text)
+                    self.search.blockSignals(False)
+                    self._group_return_filters = None
+                return_key = self._return_nav_key
+            previous_block = self.navigation.blockSignals(True)
+            if not self._select_nav_key(return_key):
+                self._select_nav_key("all")
+            self.navigation.blockSignals(previous_block)
             self.refresh_videos()
             self.trash_page.refresh()
             self.statusBar().showMessage(f"已移至程式回收桶 {completed} 部；失敗 {len(failed)} 部。")
             if failed:
                 QMessageBox.warning(self, "部分影片未刪除", "\n".join(failed[:10]))
         finally:
+            self._recycle_return_nav_key = None
             if resume_scan and not self._closing_after_worker and self.root is not None:
                 QTimer.singleShot(0, self.start_scan)
 

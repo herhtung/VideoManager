@@ -18,8 +18,7 @@ def library_stats(connection: sqlite3.Connection, library_id: str) -> dict:
                   COALESCE(SUM(file_size), 0) AS total_bytes,
                   COALESCE(SUM(duration_ms), 0) AS duration_ms,
                   COALESCE(SUM(is_favorite), 0) AS favorites,
-                  COALESCE(SUM(CASE WHEN status = 'unprocessed' THEN 1 ELSE 0 END), 0) AS unprocessed,
-                  COALESCE(SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END), 0) AS in_progress,
+                  COALESCE(SUM(CASE WHEN status IN ('unprocessed', 'in_progress') THEN 1 ELSE 0 END), 0) AS unprocessed,
                   COALESCE(SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END), 0) AS done
            FROM videos WHERE library_id = ? AND deleted_at IS NULL AND missing_since IS NULL""",
         (library_id,),
@@ -168,7 +167,7 @@ class StatsDialog(QDialog):
         progress.setValue(overview["done"])
         layout.addWidget(progress)
         states = QLabel(
-            f"待整理 {overview['unprocessed']:,}　　整理中 {overview['in_progress']:,}　　"
+            f"待整理 {overview['unprocessed']:,}　　"
             f"已整理 {overview['done']:,}"
         )
         states.setObjectName("statsMuted")

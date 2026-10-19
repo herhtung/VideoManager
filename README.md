@@ -6,7 +6,7 @@ VideoManager（VM）是一款 Windows 本機影片庫。用縮圖找影片、整
 
 ## 下載
 
-前往 [最新版本](https://github.com/herhtung/VideoManager/releases/latest)，下載 `VideoManager-Setup-0.2.12.exe` 安裝。適用於 Windows 10／11 64 位元。
+前往 [最新版本](https://github.com/herhtung/VideoManager/releases/latest)，下載 `VideoManager-Setup-0.2.13.exe` 安裝。適用於 Windows 10／11 64 位元。
 
 ## 功能
 
