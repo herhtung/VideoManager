@@ -246,6 +246,7 @@ class LibraryNavigationTests(unittest.TestCase):
         self.assertTrue(window._nav_key().startswith("group:"))
         window._show_all_related_videos(video_id)
         self.assertEqual(window._browser_section, "group")
+        self.assertTrue(window.group_section_button.isChecked())
         self.assertEqual(len(window.model.rows), 1)
         self.assertEqual(window.model.rows[0]["group_name"], "測試組")
 

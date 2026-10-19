@@ -2086,6 +2086,7 @@ class MainWindow(QMainWindow):
         self.advanced_filters = {"related_to": video_id}
         self.refresh_videos()
         if not self.model.rowCount():
+            self.group_section_button.setChecked(True)
             self._set_browser_section("group")
 
     def show_filters(self) -> None:
