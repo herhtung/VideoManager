@@ -13,7 +13,7 @@ from pathlib import Path
 from PySide6.QtCore import QSignalBlocker, QSize, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QGridLayout, QHBoxLayout, QLabel,
+    QCheckBox, QComboBox, QDialog, QFormLayout, QGridLayout, QHBoxLayout, QLabel,
     QListWidget, QListWidgetItem, QLineEdit, QMessageBox, QPushButton, QProgressBar, QSpinBox,
     QScrollArea, QStackedWidget, QTabWidget, QTableWidget, QTableWidgetItem, QTextBrowser, QVBoxLayout, QWidget,
 )
@@ -1280,6 +1280,8 @@ class CompressionCenter(QDialog):
             "failed": f"工作失敗：{row['error_message'] or '請查看錯誤資訊'}",
             "cancelled": "這部影片的工作已取消；原片仍保留。",
         }.get(row["status"], "請查看目前工作狀態。")
+        if row["status"] == "completed" and row["error_code"] == "replace_failed":
+            next_step = f"替換未完成：{row['error_message']}\n原片與壓縮副本均保留，可重試替換或取消工作。"
         if selected_worker is not None and selected_worker is self.replacement_worker:
             next_step = "正在替換原片並更新縮圖；完成後可從歷史紀錄還原。"
         self.next_step.setText(next_step)
@@ -1334,6 +1336,9 @@ class CompressionCenter(QDialog):
         )
         self.queue_actions["取消這部工作"].setEnabled(
             row["status"] in {"queued", "analyzing", "analyzed", "encoding", "validating"}
+            or (row["status"] == "completed" and selected_worker is None and self.cut_worker is None
+                and not self._analysis_uses_video(row["video_id"])
+                and not self._worker_uses_video(self.worker, row["video_id"]))
         )
         self.pause_current_button.setEnabled(selected_worker in (self.analysis_worker, self.worker)
                                              and selected_worker is not None)
@@ -1454,6 +1459,11 @@ class CompressionCenter(QDialog):
 
     def _worker_result(self, thread: CompressionThread, error: str) -> None:
         if error:
+            if thread.mode == "replace":
+                row = jobs.get_job(self.connection, thread.job_id)
+                if row is not None and row["status"] == "completed":
+                    jobs.update_job(self.connection, thread.job_id,
+                                    error_code="replace_failed", error_message=error)
             if thread.job_id == self._batch_replacing_id:
                 self._batch_replace_errors[thread.job_id] = error
             self.job_notice.emit(f"壓縮工作未完成：{error[:200]}")
@@ -1603,7 +1613,13 @@ class CompressionCenter(QDialog):
 
     def cancel_selected(self) -> None:
         identifier = self._selected_id()
-        if not identifier:
+        row = jobs.get_job(self.connection, identifier) if identifier else None
+        if row is None:
+            return
+        if row["status"] == "completed" and (
+                self.cut_worker is not None or self._analysis_uses_video(row["video_id"])
+                or self._worker_uses_video(self.worker, row["video_id"])
+                or self._worker_uses_video(self.replacement_worker, row["video_id"])):
             return
         if identifier in self._analysis_waiting:
             self._analysis_waiting.remove(identifier)
@@ -1611,12 +1627,17 @@ class CompressionCenter(QDialog):
             self.analysis_worker.requestInterruption()
         elif self.worker and self.worker.job_id == identifier:
             self.worker.requestInterruption()
-        elif jobs.get_job(self.connection, identifier)["status"] in {"queued", "analyzed"}:
+        elif row["status"] in {"queued", "analyzed", "completed"}:
             try:
-                jobs.cancel_waiting_job(self.connection, self.root, identifier)
+                if not jobs.cancel_waiting_job(self.connection, self.root, identifier):
+                    self.job_notice.emit("此工作尚有替換／復原紀錄需要處理，暫時無法取消。")
+                    return
                 self.refresh_jobs()
-            except OSError as exc:
-                QMessageBox.warning(self, "清理試壓縮片段失敗", str(exc))
+                if row["status"] == "completed":
+                    self.library_changed.emit()
+                    self.job_notice.emit("已取消工作並清除壓縮副本與暫存檔；原片未變動。")
+            except (OSError, ValueError, sqlite3.Error) as exc:
+                QMessageBox.warning(self, "取消並清理工作失敗", str(exc))
 
     def retry_selected(self) -> None:
         identifier = self._selected_id()
@@ -1812,6 +1833,7 @@ class CompressionCenter(QDialog):
                 or self._worker_uses_video(self.worker, row["video_id"])):
             return
         self.replace_button.setEnabled(False)
+        jobs.update_job(self.connection, identifier, error_code=None, error_message=None)
         self.replacement_worker = CompressionThread(self.paths, self.root, identifier, "replace",
                                                     self.capabilities, 4, self)
         self.replacement_active.emit(True)

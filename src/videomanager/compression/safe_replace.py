@@ -126,12 +126,15 @@ def _validate_chapters(original: list[dict], actual: list[dict], *,
         raise CompressionError("章節數量驗證不符")
     for index, (before, after) in enumerate(zip(original, actual)):
         expected_end = _chapter_ms(before, "end")
+        allowed_ends = [expected_end]
         if (index == len(original) - 1 and source_duration_ms is not None
                 and output_duration_ms is not None and abs(expected_end - source_duration_ms) <= 2):
-            # MP4 clips the final chapter to the verified copy's last audio/video packet.
-            expected_end = min(expected_end, output_duration_ms)
+            # MP4 may clip OR extend a full-length final chapter to the verified
+            # copy's last packet (encoder delay can make the copy slightly longer).
+            # Interior boundaries and partial final chapters must remain exact.
+            allowed_ends.append(output_duration_ms)
         if (abs(_chapter_ms(before, "start") - _chapter_ms(after, "start")) > 2
-                or abs(expected_end - _chapter_ms(after, "end")) > 2):
+                or all(abs(end - _chapter_ms(after, "end")) > 2 for end in allowed_ends)):
             raise CompressionError("章節時間驗證不符")
         if any(str(after.get("tags", {}).get(key, "")) != str(value) for key, value in before.get("tags", {}).items()):
             raise CompressionError("章節標題或資料驗證不符")

@@ -8,7 +8,7 @@ from datetime import datetime, time, timezone
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QDialogButtonBox, QGridLayout, QHBoxLayout,
-    QLabel, QLineEdit, QScrollArea, QSpinBox, QVBoxLayout, QWidget,
+    QGroupBox, QLabel, QLineEdit, QScrollArea, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from videomanager.ui.tag_picker import TagPicker
@@ -25,11 +25,14 @@ class FilterDialog(QDialog):
         self.setMinimumSize(700, 560)
         current = current or {}
         layout = QVBoxLayout(self)
-        heading = QLabel("先選標籤")
+        heading = QLabel("設定篩選條件")
         heading.setStyleSheet("font-size: 16px; font-weight: 700; color: #e1f4f0;")
         layout.addWidget(heading)
-        layout.addWidget(QLabel("同一欄可點多個標籤；每個標籤分類可收合，清單可用滾輪捲動。"))
-        tag_columns = QHBoxLayout()
+        layout.addWidget(QLabel("各分頁的條件會一起套用；未選取的項目不限制。"))
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs, 1)
+        tags_page = QWidget()
+        tag_columns = QHBoxLayout(tags_page)
         self.tag_all = TagPicker(connection)
         self.tag_any = TagPicker(connection)
         self.tag_not = TagPicker(connection)
@@ -38,34 +41,32 @@ class FilterDialog(QDialog):
             ("任一符合 · OR", self.tag_any, "tag_any"),
             ("排除 · NOT", self.tag_not, "tag_not"),
         ):
-            column = QVBoxLayout()
-            label = QLabel(title)
-            label.setStyleSheet("font-weight: 700; color: #b9e7df;")
-            column.addWidget(label)
+            group = QGroupBox(title)
+            column = QVBoxLayout(group)
             picker.set_selected(current.get(key, []))
             column.addWidget(picker, 1)
-            tag_columns.addLayout(column, 1)
-        layout.addLayout(tag_columns, 3)
+            tag_columns.addWidget(group, 1)
+        self.tabs.addTab(tags_page, "標籤")
 
-        entity_row = QHBoxLayout()
+        entities_page = QWidget()
+        entity_row = QHBoxLayout(entities_page)
         self.entity_filters = {}
         for category in repo.list_relation_types(connection):
             kind = category["id"]
-            picker = EntityPicker(connection, kind)
+            picker = EntityPicker(connection, kind, editable=False)
+            picker.scroll.setMinimumHeight(0)
+            picker.scroll.setMaximumHeight(16777215)
             selected = set(current.get("entity_ids", [])) | set(current.get(f"{kind}_ids", []))
             picker.set_selected(selected & {row["id"] for row in repo.list_entities(connection, kind)})
             self.entity_filters[kind] = picker
-            column = QVBoxLayout()
-            column.addWidget(QLabel(category["name"]))
-            column.addWidget(picker)
-            entity_row.addLayout(column, 1)
-        layout.addLayout(entity_row, 1)
+            group = QGroupBox(category["name"])
+            column = QVBoxLayout(group)
+            column.addWidget(picker, 1)
+            entity_row.addWidget(group, 1)
+        self.tabs.addTab(entities_page, "關聯")
         self.person_filter = self.entity_filters.get("person")
         self.studio_filter = self.entity_filters.get("studio")
 
-        other = QLabel("其他條件")
-        other.setStyleSheet("font-size: 15px; font-weight: 700; color: #e1f4f0; margin-top: 7px;")
-        layout.addWidget(other)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -88,10 +89,10 @@ class FilterDialog(QDialog):
             self.favorite.setCurrentIndex(1 if current["favorite"] else 2)
         self.added_from = QLineEdit(current.get("added_from", "")[:10])
         self.added_to = QLineEdit(current.get("added_to", "")[:10])
-        self.modified_from = QLineEdit()
-        self.modified_to = QLineEdit()
-        self.width = QLineEdit(str(current.get("width_min", "")))
-        self.height = QLineEdit(str(current.get("height_min", "")))
+        self.modified_from = QLineEdit(self._modified_date(current.get("modified_from_ns")))
+        self.modified_to = QLineEdit(self._modified_date(current.get("modified_to_ns")))
+        self.minimum_width = QLineEdit(str(current.get("width_min", "")))
+        self.minimum_height = QLineEdit(str(current.get("height_min", "")))
         for field in (self.added_from, self.added_to, self.modified_from, self.modified_to):
             field.setPlaceholderText("YYYY-MM-DD")
         def pair(first, second, separator="～"):
@@ -115,22 +116,28 @@ class FilterDialog(QDialog):
             ("最低星等", self.rating), ("收藏", self.favorite),
             ("加入日期", pair(self.added_from, self.added_to)),
             ("修改日期", pair(self.modified_from, self.modified_to)),
-            ("最小解析度", pair(self.width, self.height, "×")),
+            ("最小解析度", pair(self.minimum_width, self.minimum_height, "×")),
         )
         for field in (self.added_from, self.added_to, self.modified_from, self.modified_to):
             field.setPlaceholderText("YYYY-MM-DD")
-        self.width.setPlaceholderText("寬")
-        self.height.setPlaceholderText("高")
+        self.minimum_width.setPlaceholderText("寬")
+        self.minimum_height.setPlaceholderText("高")
         for field in (self.added_from, self.added_to, self.modified_from, self.modified_to):
             field.setFixedWidth(112)
-        for index, (label, field) in enumerate(rows):
-            row, column = index // 2, index % 2 * 2
-            form.addWidget(QLabel(label), row, column)
-            form.addWidget(field, row, column + 1, Qt.AlignLeft)
+        for index, (title, entries) in enumerate((
+            ("片長與容量", rows[:2]), ("星等與收藏", rows[2:4]),
+            ("日期範圍", rows[4:6]), ("解析度", rows[6:]),
+        )):
+            group = QGroupBox(title)
+            fields_layout = QGridLayout(group)
+            for number, (label, field) in enumerate(entries):
+                fields_layout.addWidget(QLabel(label), number, 0)
+                fields_layout.addWidget(field, number, 1, Qt.AlignLeft)
+            form.addWidget(group, index // 2, index % 2)
         scroll.setWidget(fields)
-        scroll.setMinimumHeight(150)
-        scroll.setMaximumHeight(190)
-        layout.addWidget(scroll)
+        self.tabs.addTab(scroll, "其他條件")
+        self.selection_summary = QLabel()
+        layout.addWidget(self.selection_summary)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setText("套用篩選")
         buttons.button(QDialogButtonBox.Cancel).setText("取消")
@@ -138,6 +145,33 @@ class FilterDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+        for picker in (self.tag_all, self.tag_any, self.tag_not):
+            picker.tag_clicked.connect(self._update_counts)
+        for picker in self.entity_filters.values():
+            picker.selectionChanged.connect(self._update_counts)
+        for field in self._condition_fields():
+            field.textChanged.connect(self._update_counts)
+        self.rating.valueChanged.connect(self._update_counts)
+        self.favorite.currentIndexChanged.connect(self._update_counts)
+        self._update_counts()
+
+    @staticmethod
+    def _modified_date(value) -> str:
+        return datetime.fromtimestamp(value / 1e9).astimezone().date().isoformat() if value is not None else ""
+
+    def _condition_fields(self):
+        return (self.duration_min, self.duration_max, self.size_min, self.size_max,
+                self.added_from, self.added_to, self.modified_from, self.modified_to, self.minimum_width, self.minimum_height)
+
+    def _update_counts(self, *_args):
+        tags = sum(len(picker.selected_ids()) for picker in (self.tag_all, self.tag_any, self.tag_not))
+        entities = len(set().union(*(picker.selected_ids() for picker in self.entity_filters.values())))
+        other = (sum(bool(field.text().strip()) for field in self._condition_fields())
+                 + int(self.rating.value() > 0) + int(self.favorite.currentData() is not None))
+        for index, (title, count) in enumerate((("標籤", tags), ("關聯", entities), ("其他條件", other))):
+            self.tabs.setTabText(index, f"{title}（{count}）" if count else title)
+        self.selection_summary.setText(f"已選：標籤 {tags} 項 · 關聯 {entities} 項 · 其他 {other} 項"
+                                       if tags or entities or other else "尚未設定條件，套用後顯示全部影片。")
 
     def clear_all(self) -> None:
         for picker in (self.tag_all, self.tag_any, self.tag_not, *self.entity_filters.values()):
@@ -146,10 +180,11 @@ class FilterDialog(QDialog):
             picker.reload()
         for field in (self.duration_min, self.duration_max, self.size_min, self.size_max,
                       self.added_from, self.added_to, self.modified_from, self.modified_to,
-                      self.width, self.height):
+                      self.minimum_width, self.minimum_height):
             field.clear()
         self.rating.setValue(0)
         self.favorite.setCurrentIndex(0)
+        self._update_counts()
 
     @staticmethod
     def _utc_date(text: str, *, end: bool = False) -> str:
@@ -164,8 +199,8 @@ class FilterDialog(QDialog):
             (self.duration_max, "duration_max_ms", 1000),
             (self.size_min, "size_min", 1024**3),
             (self.size_max, "size_max", 1024**3),
-            (self.width, "width_min", 1),
-            (self.height, "height_min", 1),
+            (self.minimum_width, "width_min", 1),
+            (self.minimum_height, "height_min", 1),
         ):
             if widget.text().strip():
                 value = float(widget.text().strip())

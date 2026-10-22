@@ -6,9 +6,9 @@ import sqlite3
 from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QColorDialog, QComboBox, QDialog, QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
+    QApplication, QCheckBox, QColorDialog, QDialog, QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
     QListWidgetItem, QMessageBox, QSizePolicy,
     QPushButton, QScrollArea, QVBoxLayout, QWidget, QGridLayout,
     QTabWidget,
@@ -17,12 +17,16 @@ from PySide6.QtWidgets import (
 from videomanager.ui.notifications import notify_information
 from videomanager.db import repository as repo
 from videomanager.ui.tag_picker import CategoryChooser, TagPicker
-from videomanager.ui.entity_images import choose_entity_thumbnail, thumbnail_icon
+from videomanager.ui.entity_images import (choose_entity_thumbnail, show_entity_thumbnail_menu,
+                                          paste_entity_thumbnail, show_entity_photo, thumbnail_icon)
+from videomanager.ui.relation_button import RelationButton
+from videomanager.ui.image_crop_dialog import photo_size
 
 
 class EntityButtonList(QScrollArea):
     """Four equally sized columns of relation buttons."""
     currentItemChanged = Signal(object, object)
+    entity_dropped = Signal(str, str, bool)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -41,10 +45,11 @@ class EntityButtonList(QScrollArea):
         self._current = None
 
     def add_relation(self, item: QListWidgetItem) -> None:
-        button = QPushButton(item.icon(), item.text())
-        button.setToolTip(item.text())
-        button.setIconSize(QSize(32, 32))
-        button.setMinimumHeight(40)
+        button = RelationButton(item.text(), item.data(Qt.UserRole))
+        button.setIcon(item.icon())
+        button.entity_dropped.connect(self.entity_dropped)
+        button.setToolTip(item.text() + "\n拖曳調整順序，也能移到其他關聯類別。")
+        button.setIconSize(photo_size(112))
         button.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         button.setCheckable(True)
         button.setStyleSheet("QPushButton { text-align: left; min-height: 32px; } "
@@ -54,6 +59,11 @@ class EntityButtonList(QScrollArea):
         self._items.append(item)
         self._buttons.append(button)
         self.grid.addWidget(button, index // 4, index % 4)
+        row_buttons = self._buttons[index // 4 * 4:]
+        height = 77 if any(not chip.icon().isNull() for chip in row_buttons) else 40
+        for chip in row_buttons:
+            chip.ensurePolished()
+            chip.setFixedHeight(height)
 
     def count(self) -> int:
         return len(self._items)
@@ -250,6 +260,9 @@ class MetadataDialog(QDialog):
         self.entity_sections.setWidgetResizable(True)
         layout.addWidget(self.entity_sections, 1)
         self._reload_entity_sections()
+        self.paste_photo_shortcut = QShortcut(QKeySequence.Paste, page)
+        self.paste_photo_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        self.paste_photo_shortcut.activated.connect(self.paste_active_entity_image)
         return page
 
     def _reload_entity_sections(self) -> None:
@@ -257,13 +270,24 @@ class MetadataDialog(QDialog):
         layout = QVBoxLayout(container)
         self.entity_lists: dict[str, EntityButtonList] = {}
         self.entity_names: dict[str, QLineEdit] = {}
+        self.entity_headers = {}
+        self.entity_previews = {}
+        self.entity_image_remove_buttons = {}
         categories = repo.list_relation_types(self.connection)
         self.add_relation_type_button.setEnabled(len(categories) < 3)
         for index, category in enumerate(categories):
             entity_type, title = category["id"], category["name"]
-            section = QGroupBox(title)
+            section = QGroupBox()
             section_layout = QVBoxLayout(section)
             type_actions = QHBoxLayout()
+            header = RelationButton(title, entity_type, category=True)
+            header.setToolTip("拖曳調整類別順序；將關聯項目拖到這裡可移入類別。")
+            header.type_dropped.connect(lambda source, target, after: QTimer.singleShot(
+                0, lambda: self._relation_type_dropped(source, target, after)))
+            header.entity_dropped.connect(lambda source, target, _after: QTimer.singleShot(
+                0, lambda: self._entity_dropped(source, None, False, target)))
+            self.entity_headers[entity_type] = header
+            type_actions.addWidget(header)
             type_actions.addStretch()
             for text, action in (("類別改名", "rename"), ("↑", "up"), ("↓", "down"), ("移除空類別", "remove")):
                 button = QPushButton(text)
@@ -278,7 +302,9 @@ class MetadataDialog(QDialog):
                 type_actions.addWidget(button)
             section_layout.addLayout(type_actions)
             listing = EntityButtonList()
-            listing.setMinimumHeight(100)
+            listing.setMinimumHeight(180)
+            listing.entity_dropped.connect(lambda source, target, after: QTimer.singleShot(
+                0, lambda: self._entity_dropped(source, target, after)))
             listing.currentItemChanged.connect(
                 lambda current, _previous, kind=entity_type: self._entity_selected(kind, current))
             section_layout.addWidget(listing, 1)
@@ -286,18 +312,38 @@ class MetadataDialog(QDialog):
             name = QLineEdit()
             name.setPlaceholderText(f"{title}名稱")
             name.returnPressed.connect(lambda kind=entity_type: self.add_entity(kind))
-            section_layout.addWidget(name)
+            editor_row = QHBoxLayout()
+            preview = QPushButton("未設定照片")
+            preview.setIconSize(photo_size(192))
+            preview.setStyleSheet("QPushButton { padding: 4px; }")
+            preview.ensurePolished()
+            preview.setFixedSize(photo_size(192) + QSize(12, 12))
+            preview.setToolTip("點一下放大檢視照片；沒有照片時可選擇圖片。")
+            preview.setContextMenuPolicy(Qt.CustomContextMenu)
+            preview.customContextMenuRequested.connect(
+                lambda point, kind=entity_type, button=preview: self._entity_photo_menu(kind, button, point))
+            preview.clicked.connect(lambda _=False, kind=entity_type: self.view_entity_image(kind))
+            self.entity_previews[entity_type] = preview
+            editor_row.addWidget(preview)
+            editor = QVBoxLayout()
+            editor.addWidget(name)
             self.entity_names[entity_type] = name
-            actions = QHBoxLayout()
+            actions = QGridLayout()
             for text, action in (("新增", self.add_entity), ("儲存名稱", self.rename_entity),
+                                 ("更換照片…", self.set_entity_image), ("移除照片", self.remove_entity_image),
+                                 ("貼上照片", self.paste_entity_image),
                                  ("項目上移", lambda kind: self.move_entity_item(kind, -1)),
                                  ("項目下移", lambda kind: self.move_entity_item(kind, 1)),
-                                 ("設定小縮圖…", self.set_entity_image),
                                  ("刪除", self.delete_entity)):
                 button = QPushButton(text)
                 button.clicked.connect(lambda _=False, kind=entity_type, callback=action: callback(kind))
-                actions.addWidget(button)
-            section_layout.addLayout(actions)
+                number = actions.count()
+                actions.addWidget(button, number // 4, number % 4)
+                if text == "移除照片":
+                    self.entity_image_remove_buttons[entity_type] = button
+            editor.addLayout(actions)
+            editor_row.addLayout(editor, 1)
+            section_layout.addLayout(editor_row)
             layout.addWidget(section, 1)
         self.entity_sections.setWidget(container)
         self.refresh_entities()
@@ -347,7 +393,69 @@ class MetadataDialog(QDialog):
                 self.entity_names[entity_type].clear()
 
     def _entity_selected(self, entity_type: str, current) -> None:
+        if current:
+            self._active_entity_type = entity_type
         self.entity_names[entity_type].setText(current.text() if current else "")
+        row = self.connection.execute("SELECT thumbnail_png FROM entities WHERE id=?",
+                                      (current.data(Qt.UserRole),)).fetchone() if current else None
+        png = row["thumbnail_png"] if row else None
+        self.entity_previews[entity_type].setIcon(thumbnail_icon(png))
+        self.entity_previews[entity_type].setText("" if png else "未設定照片")
+        self.entity_image_remove_buttons[entity_type].setEnabled(bool(png))
+
+    def paste_active_entity_image(self) -> None:
+        focus = QApplication.focusWidget()
+        if isinstance(focus, QLineEdit):
+            focus.paste()
+            return
+        kind = getattr(self, "_active_entity_type", None)
+        if kind in self.entity_lists:
+            self.paste_entity_image(kind)
+
+    def paste_entity_image(self, entity_type: str) -> None:
+        item = self.entity_lists[entity_type].currentItem()
+        if item and paste_entity_thumbnail(self, self.connection, item.data(Qt.UserRole)):
+            self.refresh_entities(item.data(Qt.UserRole))
+
+    def _entity_photo_menu(self, kind, button, point) -> None:
+        item = self.entity_lists[kind].currentItem()
+        if item is None:
+            return
+        identifier = item.data(Qt.UserRole)
+        show_entity_thumbnail_menu(self, self.connection, identifier, button.mapToGlobal(point), self.refresh_entities)
+
+    def view_entity_image(self, entity_type: str) -> None:
+        item = self.entity_lists[entity_type].currentItem()
+        row = self.connection.execute("SELECT name,thumbnail_png FROM entities WHERE id=?",
+                                      (item.data(Qt.UserRole),)).fetchone() if item else None
+        if row and row["thumbnail_png"]:
+            show_entity_photo(self, row["thumbnail_png"], row["name"])
+        elif item:
+            self.set_entity_image(entity_type)
+
+    def remove_entity_image(self, entity_type: str) -> None:
+        item = self.entity_lists[entity_type].currentItem()
+        if item:
+            try:
+                repo.set_entity_thumbnail(self.connection, item.data(Qt.UserRole), None)
+                self.refresh_entities(item.data(Qt.UserRole))
+            except (sqlite3.Error, ValueError) as exc:
+                QMessageBox.warning(self, "移除照片失敗", str(exc))
+
+    def _entity_dropped(self, source: str, target: str | None, after: bool,
+                        target_type: str | None = None) -> None:
+        try:
+            repo.reorder_entity(self.connection, source, target, after, target_type=target_type)
+            self.refresh_entities(source)
+        except (sqlite3.Error, ValueError) as exc:
+            QMessageBox.warning(self, "移動關聯失敗", str(exc))
+
+    def _relation_type_dropped(self, source: str, target: str, after: bool) -> None:
+        try:
+            repo.reorder_relation_type(self.connection, source, target, after)
+            self._reload_entity_sections()
+        except (sqlite3.Error, ValueError) as exc:
+            QMessageBox.warning(self, "移動關聯類別失敗", str(exc))
 
     def set_entity_image(self, entity_type: str) -> None:
         item = self.entity_lists[entity_type].currentItem()

@@ -532,6 +532,42 @@ def set_entity_thumbnail(connection: sqlite3.Connection, entity_id: str, png: by
             raise ValueError("找不到此人物或片商。")
 
 
+def reorder_entity(connection: sqlite3.Connection, identifier: str, target_id: str | None,
+                   after: bool = False, *, target_type: str | None = None) -> None:
+    """Move a relation without changing its ID, portrait or video links."""
+    source = connection.execute("SELECT type,name FROM entities WHERE id=?", (identifier,)).fetchone()
+    target = connection.execute("SELECT type FROM entities WHERE id=?", (target_id,)).fetchone() if target_id else None
+    kind = target["type"] if target else target_type
+    if source is None or (target_id and target is None) or not kind:
+        raise ValueError("找不到要移動的關聯項目。")
+    if identifier == target_id:
+        return
+    destination = list_entities(connection, kind)
+    if source["type"] != kind and any(row["name"] == source["name"] for row in destination):
+        raise ValueError("目標類別已有同名關聯，請先改名。")
+    ordered = [row["id"] for row in destination if row["id"] != identifier]
+    position = ordered.index(target_id) + int(after) if target_id else len(ordered)
+    ordered.insert(position, identifier)
+    with connection:
+        connection.execute("UPDATE entities SET type=? WHERE id=?", (kind, identifier))
+        connection.executemany("UPDATE entities SET sort_order=? WHERE id=?", enumerate(ordered))
+        if source["type"] != kind:
+            connection.executemany("UPDATE entities SET sort_order=? WHERE id=?",
+                                   enumerate(row["id"] for row in list_entities(connection, source["type"])))
+
+
+def reorder_relation_type(connection: sqlite3.Connection, identifier: str, target_id: str, after: bool) -> None:
+    identifiers = [row["id"] for row in list_relation_types(connection)]
+    if identifier not in identifiers or target_id not in identifiers:
+        raise ValueError("找不到關聯類別。")
+    if identifier == target_id:
+        return
+    identifiers.remove(identifier)
+    identifiers.insert(identifiers.index(target_id) + int(after), identifier)
+    with connection:
+        connection.executemany("UPDATE relation_types SET sort_order=? WHERE id=?", enumerate(identifiers))
+
+
 def create_entity(connection: sqlite3.Connection, entity_type: str, name: str) -> str:
     name = name.strip()
     if not name or not connection.execute("SELECT 1 FROM relation_types WHERE id=?", (entity_type,)).fetchone():

@@ -43,11 +43,11 @@ def _bind(library, name: str, result, *arguments):
 class VlcAudioOutput:
     def __init__(self, backend: "VlcPlayer") -> None:
         self.backend = backend
-        self._volume = 0.7
+        self._volume = 1.0
         self._muted = False
 
     def setVolume(self, volume: float) -> None:
-        self._volume = max(0.0, min(1.0, volume))
+        self._volume = max(0.0, min(2.0, volume))
         self.apply()
 
     def setMuted(self, muted: bool) -> None:

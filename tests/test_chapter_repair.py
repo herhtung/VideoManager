@@ -59,3 +59,15 @@ class ChapterRepairTests(unittest.TestCase):
             _validate_chapters(original, clipped, source_duration_ms=3000, output_duration_ms=2990)
         with self.assertRaises(CompressionError):
             _validate_chapters(original * 2, clipped * 2, source_duration_ms=3000, output_duration_ms=2945)
+
+    def test_full_final_chapter_may_extend_to_verified_copy_duration(self):
+        original = [{"start_time": "0", "end_time": "5736.931", "tags": {"title": ""}}]
+        extended = [{"start_time": "0", "end_time": "5737.189546", "tags": {"title": ""}}]
+        _validate_chapters(original, extended, source_duration_ms=5736931, output_duration_ms=5737190)
+        _validate_chapters(original, original, source_duration_ms=5736931, output_duration_ms=5737190)
+        with self.assertRaises(CompressionError):
+            _validate_chapters(original, extended, source_duration_ms=5736931, output_duration_ms=5737090)
+        with self.assertRaises(CompressionError):
+            _validate_chapters(original, extended, source_duration_ms=5737031, output_duration_ms=5737190)
+        with self.assertRaises(CompressionError):
+            _validate_chapters(original * 2, extended * 2, source_duration_ms=5736931, output_duration_ms=5737190)

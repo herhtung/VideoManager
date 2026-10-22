@@ -19,6 +19,7 @@ def main(argv: list[str] | None = None) -> int:
         from PySide6.QtWidgets import QApplication
         from videomanager.ui.main_window import MainWindow
         from videomanager.ui.theme import apply_theme
+        from videomanager.ui.text_input import install_text_input_support
     except ImportError as exc:
         message = f"Desktop import failed: {exc}. Install dependencies with: pip install -e ."
         try:
@@ -29,6 +30,7 @@ def main(argv: list[str] | None = None) -> int:
         print(message, file=sys.stderr)
         return 2
     app = QApplication(sys.argv[:1])
+    install_text_input_support(app)
     apply_theme(app)
     app.setWindowIcon(QIcon(str(brand_icon_path())))
     window = MainWindow(paths)

@@ -6,7 +6,6 @@ import json
 import hashlib
 import os
 import queue
-import re
 import shutil
 import subprocess
 import threading

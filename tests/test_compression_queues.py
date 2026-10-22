@@ -18,7 +18,7 @@ from PySide6.QtWidgets import QApplication
 
 from videomanager.compression.profiles import Profile
 from videomanager.compression.worker import _run_ffmpeg
-from videomanager.compression.repository import get_job, queue_video, schedule_encode, update_job
+from videomanager.compression.repository import cancel_waiting_job, get_job, queue_video, schedule_encode, update_job
 from videomanager.config import AppPaths
 from videomanager.db.database import open_database
 from videomanager.services.library_service import open_library
@@ -59,11 +59,6 @@ class CompressionQueueTests(unittest.TestCase):
                 schedule_encode(connection, encode_id)
                 first_id = queue_video(connection, root, library_id, ids["first.mp4"], Profile())
                 second_id = queue_video(connection, root, library_id, ids["second.mp4"], Profile())
-                center = CompressionCenter(paths, connection, root, library_id)
-                center.show()
-                center.cap_thread.wait(30000)
-                self.app.processEvents()
-
                 def fake_analysis(worker_connection, identifier, _root, _cap, _count,
                                   cancelled, progress) -> None:
                     update_job(worker_connection, identifier, status="analyzing")
@@ -89,6 +84,12 @@ class CompressionQueueTests(unittest.TestCase):
 
                 with patch("videomanager.ui.compression_center.run_analysis", side_effect=fake_analysis), \
                      patch("videomanager.ui.compression_center.run_encode", side_effect=fake_encode):
+                    # Capability completion can auto-start queued work; prevent
+                    # real FFmpeg from racing the test's fake worker callbacks.
+                    center = CompressionCenter(paths, connection, root, library_id)
+                    center.show()
+                    center.cap_thread.wait(30000)
+                    self.app.processEvents()
                     center._pump_encode()
                     self.assertTrue(encode_started.wait(5))
                     center._start_batch("analyze")
@@ -209,6 +210,79 @@ class CompressionQueueTests(unittest.TestCase):
             finally:
                 if center is not None:
                     center.worker = None
+                    center.replacement_worker = None
+                    center.close()
+                connection.close()
+
+    def test_completed_copy_can_open_or_cancel_and_replacement_errors_remain_visible(self):
+        with tempfile.TemporaryDirectory(prefix="vm-cancel-completed-") as directory:
+            base = Path(directory)
+            root = base / "library"
+            root.mkdir()
+            source = root / "original.mp4"
+            source.write_bytes(b"original stays unchanged")
+            paths = AppPaths(base / "data")
+            library_id = open_library(paths, root, create=True).marker.library_id
+            connection = open_database(paths.database, paths.backups)
+            center = None
+            try:
+                synchronize(connection, library_id, root, scan_library(root, library_id))
+                video_id = connection.execute("SELECT id FROM videos").fetchone()[0]
+                identifier = queue_video(connection, root, library_id, video_id, Profile())
+                copy = root / ".videomanager" / "compressed" / "copy.mp4"
+                copy.parent.mkdir(parents=True)
+                copy.write_bytes(b"completed copy")
+                update_job(connection, identifier, status="analyzed")
+                schedule_encode(connection, identifier)
+                update_job(connection, identifier, status="completed",
+                           output_rel_path=copy.relative_to(root).as_posix(), actual_size=14,
+                           actual_reduction_pct=30)
+                center = CompressionCenter(paths, connection, root, library_id)
+                center.cap_thread.wait(30000)
+                self.app.processEvents()
+                center.refresh_jobs(identifier)
+                self.assertTrue(center.queue_actions["取消這部工作"].isEnabled())
+                opened = []
+                center.play_path_requested.connect(lambda *args: opened.append(args))
+                center._open_path("output")
+                self.assertEqual(opened, [(video_id, str(copy))])
+
+                replacement = MagicMock(job_id=identifier, mode="replace")
+                center.replacement_worker = replacement
+                center._show_job()
+                self.assertFalse(center.queue_actions["取消這部工作"].isEnabled())
+                center.cancel_selected()
+                self.assertEqual(get_job(connection, identifier)["status"], "completed")
+                center.replacement_worker = None
+                center._worker_result(replacement, "章節時間驗證不符")
+                center.refresh_jobs(identifier)
+                self.assertIn("章節時間驗證不符", center.next_step.text())
+                self.assertTrue(center.replace_button.isEnabled())
+                with connection:
+                    connection.execute(
+                        "INSERT INTO compression_replacements "
+                        "(job_id,source_rel_path,output_rel_path,preserved_rel_path,state,updated_at) "
+                        "VALUES (?,?,?,?,?,datetime('now'))",
+                        (identifier, "original.mp4", copy.relative_to(root).as_posix(),
+                         ".videomanager/compression-originals/preserved.mp4", "prepared"))
+                self.assertFalse(cancel_waiting_job(connection, root, identifier))
+                self.assertEqual(get_job(connection, identifier)["status"], "completed")
+                with connection:
+                    connection.execute("UPDATE compression_replacements SET state='recovered' WHERE job_id=?", (identifier,))
+                changes = []
+                center.library_changed.connect(lambda: changes.append(True))
+                center.cancel_selected()
+                row = get_job(connection, identifier)
+                self.assertEqual(row["status"], "cancelled")
+                self.assertEqual(row["encode_queued"], 0)
+                self.assertFalse(copy.exists())
+                self.assertIsNone(row["output_rel_path"])
+                self.assertIsNone(row["actual_size"])
+                self.assertEqual(changes, [True])
+                self.assertEqual(source.read_bytes(), b"original stays unchanged")
+                self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
+            finally:
+                if center is not None:
                     center.replacement_worker = None
                     center.close()
                 connection.close()

@@ -182,6 +182,7 @@ class DetailsPanel(QWidget):
             picker.scroll.setMaximumHeight(16777215)
             picker.set_selected(selected.get(row["id"], set()))
             picker.selectionChanged.connect(self._refresh_entity_summary)
+            picker.orderChanged.connect(self._reload_entity_order)
             layout.addWidget(picker, 1)
             self.relations_layout.addWidget(section, 1)
             self.entity_pickers[row["id"]] = picker
@@ -189,6 +190,12 @@ class DetailsPanel(QWidget):
         self.people = self.entity_pickers.get("person")
         self.studios = self.entity_pickers.get("studio")
         self._relation_signature = signature
+
+    def _reload_entity_order(self) -> None:
+        selected = self._selected_entities()
+        for kind, picker in self.entity_pickers.items():
+            picker.reload()
+            picker.set_selected(selected & {row["id"] for row in repo.list_entities(self.connection, kind)})
 
     def _selected_entities(self) -> set[str]:
         return set().union(*(picker.selected_ids() for picker in self.entity_pickers.values()))

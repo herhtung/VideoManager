@@ -3,22 +3,26 @@ from __future__ import annotations
 
 import sqlite3
 
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (QInputDialog, QGridLayout, QHBoxLayout, QLineEdit,
-                               QMenu, QMessageBox, QPushButton, QScrollArea, QVBoxLayout,
+                               QMessageBox, QPushButton, QScrollArea, QVBoxLayout,
                                QWidget, QLabel, QSizePolicy)
 
 from videomanager.db import repository as repo
-from videomanager.ui.entity_images import choose_entity_thumbnail, thumbnail_icon
+from videomanager.ui.entity_images import show_entity_thumbnail_menu, thumbnail_icon
+from videomanager.ui.relation_button import RelationButton
+from videomanager.ui.image_crop_dialog import photo_size
 
 
 class EntityPicker(QWidget):
     selectionChanged = Signal()
+    orderChanged = Signal()
 
-    def __init__(self, connection: sqlite3.Connection, entity_type: str, parent=None) -> None:
+    def __init__(self, connection: sqlite3.Connection, entity_type: str, parent=None, *, editable: bool = True) -> None:
         super().__init__(parent)
         self.connection = connection
         self.entity_type = entity_type
+        self.editable = editable
         self._selected: set[str] = set()
         self._buttons: dict[str, QPushButton] = {}
         self.search = QLineEdit()
@@ -27,6 +31,7 @@ class EntityPicker(QWidget):
         self.add_button = QPushButton("＋")
         self.add_button.setFixedWidth(36)
         self.add_button.setToolTip("新增關聯名稱")
+        self.add_button.setVisible(editable)
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -65,22 +70,34 @@ class EntityPicker(QWidget):
                 if not query or query in row["name"].casefold()]
         for index, row in enumerate(rows):
             identifier = row["id"]
-            button = QPushButton(row["name"])
+            button = RelationButton(row["name"], identifier)
+            if not self.editable:
+                button.mime_type = None
+                button.setAcceptDrops(False)
+            button.entity_dropped.connect(lambda source, target, after: QTimer.singleShot(
+                0, lambda: self._drop_entity(source, target, after)))
             button.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
             button.setIcon(thumbnail_icon(row["thumbnail_png"]))
-            button.setIconSize(QSize(28, 28))
+            button.setIconSize(photo_size(96))
+            button.setProperty("hasPortrait", bool(row["thumbnail_png"]))
             button.setObjectName("entityChip")
             button.setCheckable(True)
             button.setChecked(identifier in self._selected)
-            button.setToolTip(f"{row['name']}\n點一下加入／移除；按右鍵可設定辨識縮圖")
+            button.setToolTip(f"{row['name']}\n" + ("點一下加入／移除；拖曳調整順序；右鍵管理照片"
+                                                    if self.editable else "點選加入／移除篩選條件"))
             button.clicked.connect(lambda checked, entity_id=identifier: self._toggle(entity_id, checked))
-            button.setContextMenuPolicy(Qt.CustomContextMenu)
+            button.setContextMenuPolicy(Qt.CustomContextMenu if self.editable else Qt.NoContextMenu)
             button.customContextMenuRequested.connect(
-                lambda point, entity_id=identifier, chip=button, has_image=bool(row["thumbnail_png"]):
-                self._thumbnail_menu(entity_id, chip, point, has_image)
+                lambda point, entity_id=identifier, chip=button:
+                self._thumbnail_menu(entity_id, chip, point)
             )
             grid.addWidget(button, index // 2, index % 2)
             self._buttons[identifier] = button
+            row_buttons = list(self._buttons.values())[-(index % 2 + 1):]
+            height = 66 if any(chip.property("hasPortrait") for chip in row_buttons) else 36
+            for chip in row_buttons:
+                chip.ensurePolished()
+                chip.setFixedHeight(height)
         if not rows:
             message = QLabel("尚無項目，按「＋」新增。" if not query else "沒有符合項目")
             message.setStyleSheet("color: #9eb1b9; padding: 5px;")
@@ -90,16 +107,17 @@ class EntityPicker(QWidget):
         self.scroll.setWidget(container)
         self.scroll.verticalScrollBar().setValue(previous_scroll)
 
-    def _thumbnail_menu(self, entity_id: str, button: QPushButton, point, has_image: bool) -> None:
-        menu = QMenu(button)
-        menu.addAction("設定小縮圖…", lambda: self._choose_thumbnail(entity_id))
-        if has_image:
-            menu.addAction("移除小縮圖", lambda: self._remove_thumbnail(entity_id))
-        menu.exec(button.mapToGlobal(point))
+    def _thumbnail_menu(self, entity_id: str, button: QPushButton, point) -> None:
+        show_entity_thumbnail_menu(self, self.connection, entity_id, button.mapToGlobal(point),
+                                   lambda _identifier: self.reload())
 
-    def _choose_thumbnail(self, entity_id: str) -> None:
-        if choose_entity_thumbnail(self, self.connection, entity_id):
+    def _drop_entity(self, source: str, target: str, after: bool) -> None:
+        try:
+            repo.reorder_entity(self.connection, source, target, after)
             self.reload()
+            self.orderChanged.emit()
+        except (sqlite3.Error, ValueError) as exc:
+            QMessageBox.warning(self, "移動關聯失敗", str(exc))
 
     def _remove_thumbnail(self, entity_id: str) -> None:
         try:

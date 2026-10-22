@@ -222,8 +222,8 @@ class RelatedVideosPopup(QFrame):
             else:
                 icon = thumbnail_icon(entry["thumbnail_png"])
                 button.setIcon(icon)
-                button.setIconSize(QSize(20, 20))
-                extra = 24 if not icon.isNull() else 0
+                button.setIconSize(QSize(32, 18))
+                extra = 36 if not icon.isNull() else 0
                 button.clicked.connect(lambda _=False, identifier=entry["id"], entity_type=kind:
                                        self.entity_requested.emit(entity_type, identifier))
             button.ensurePolished()

@@ -7,16 +7,18 @@ from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPoint, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
-    QAbstractSpinBox, QApplication, QComboBox, QDialog, QHBoxLayout, QLabel, QLineEdit, QMenu,
-    QPlainTextEdit, QPushButton, QScrollArea, QSlider, QSpinBox, QTextEdit, QVBoxLayout, QWidget,
+    QApplication, QDialog, QHBoxLayout, QLabel, QMenu,
+    QPushButton, QScrollArea, QSlider, QVBoxLayout, QWidget,
 )
 
 from videomanager.ui.details_panel import DetailsPanel
 from videomanager.ui.vlc_backend import VlcPlayer, find_vlc_directory
 from videomanager.ui.mpv_backend import MpvPlayer, find_mpv_directory
+from videomanager.ui.qt_audio_output import QtAudioOutput
+from videomanager.ui.text_input import text_input_has_focus
 
 
 class ClickSeekSlider(QSlider):
@@ -63,7 +65,7 @@ class PlayerView(QDialog):
         self.segment_index = next((i for i, (identifier, _) in enumerate(self.segments)
                                    if identifier == video_id), 0)
         self.player = QMediaPlayer(self)
-        self.audio = QAudioOutput(self)
+        self.audio = QtAudioOutput(self.player, self)
         self.player.setAudioOutput(self.audio)
         self._qt_player = self.player
         self._qt_audio = self.audio
@@ -100,12 +102,13 @@ class PlayerView(QDialog):
         mute = QPushButton("靜音")
         mute.clicked.connect(lambda: self.audio.setMuted(not self.audio.isMuted()))
         self.volume = QSlider(Qt.Horizontal)
-        self.volume.setRange(0, 100)
-        self.volume.setValue(70)
+        self.volume.setRange(0, 200)
+        self.volume.setValue(100)
         self.volume.setMaximumWidth(110)
-        self.volume_label = QLabel("70%")
+        self.volume_label = QLabel("100%")
         self.volume.valueChanged.connect(self._set_volume)
-        self.audio.setVolume(0.7)
+        self.audio.boost_failed.connect(lambda: self.volume.setValue(100))
+        self.audio.setVolume(1.0)
         self.info_button = QPushButton("顯示資訊")
         self.info_button.clicked.connect(self.toggle_details)
         self.compress_button = QPushButton("壓縮")
@@ -135,6 +138,7 @@ class PlayerView(QDialog):
                        self.fullscreen_button, external, self.backend_button, close):
             button.setObjectName("playerControl")
         self.exit_shortcut = QShortcut(QKeySequence(Qt.Key_Escape), self)
+        self.exit_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         self.exit_shortcut.activated.connect(self.exit_fullscreen)
 
         controls = QHBoxLayout()
@@ -183,25 +187,28 @@ class PlayerView(QDialog):
         )
         self.details_overlay.hide()
         self.video.installEventFilter(self)
-        self._shortcuts: list[QShortcut] = []
-        for owner in (self, self.details_overlay):
+        self._shortcuts: list[QShortcut] = [self.exit_shortcut]
+        shortcut_owners = (self,) if embedded else (self, self.details_overlay)
+        for owner in shortcut_owners:
             for key in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down):
                 shortcut = QShortcut(QKeySequence(key), owner)
-                shortcut.setContext(Qt.WindowShortcut)
+                shortcut.setContext(Qt.WidgetWithChildrenShortcut)
                 shortcut.activated.connect(lambda pressed=key: self._playback_key(pressed))
                 self._shortcuts.append(shortcut)
         # The native video surface receives key events itself on Windows, so
         # PlayerView.keyPressEvent alone does not reliably see the space bar.
-        space_owners = (self,) if embedded else (self, self.details_overlay)
-        self._space_shortcuts: list[QShortcut] = []
-        for owner in space_owners:
+        for owner in shortcut_owners:
             shortcut = QShortcut(QKeySequence(Qt.Key_Space), owner)
             shortcut.setContext(Qt.WidgetWithChildrenShortcut)
             shortcut.activated.connect(self._toggle_playback_shortcut)
             self._shortcuts.append(shortcut)
-            self._space_shortcuts.append(shortcut)
-        QApplication.instance().focusChanged.connect(self._update_space_shortcuts)
-        self._update_space_shortcuts()
+            fullscreen = QShortcut(QKeySequence(Qt.Key_F), owner)
+            fullscreen.setContext(Qt.WidgetWithChildrenShortcut)
+            fullscreen.setAutoRepeat(False)
+            fullscreen.activated.connect(self._toggle_fullscreen_shortcut)
+            self._shortcuts.append(fullscreen)
+        QApplication.instance().focusChanged.connect(self._update_playback_shortcuts)
+        self._update_playback_shortcuts()
         self._connect_player_signals()
         self._update_segment_buttons()
         if default_backend in {"vlc", "mpv"}:
@@ -487,22 +494,17 @@ class PlayerView(QDialog):
         else:
             self.player.play()
 
-    @staticmethod
-    def _focus_accepts_space() -> bool:
-        widget = QApplication.focusWidget()
-        while widget is not None:
-            if isinstance(widget, (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox, QComboBox)):
-                return True
-            widget = widget.parentWidget()
-        return False
-
-    def _update_space_shortcuts(self, *_args) -> None:
-        enabled = not self._focus_accepts_space()
-        for shortcut in self._space_shortcuts:
+    def _update_playback_shortcuts(self, *_args) -> None:
+        enabled = not text_input_has_focus()
+        for shortcut in self._shortcuts:
             shortcut.setEnabled(enabled)
 
+    def _toggle_fullscreen_shortcut(self) -> None:
+        if not text_input_has_focus():
+            self.toggle_fullscreen()
+
     def _toggle_playback_shortcut(self) -> None:
-        if self._focus_accepts_space():
+        if text_input_has_focus():
             return
         self.toggle_play()
 
@@ -511,24 +513,31 @@ class PlayerView(QDialog):
         self.volume_label.setText(f"{value}%")
 
     def _playback_key(self, key: Qt.Key) -> None:
-        if isinstance(QApplication.focusWidget(), (QLineEdit, QTextEdit, QSpinBox, QComboBox)):
+        if text_input_has_focus():
             return
         if key == Qt.Key_Left:
             self.player.setPosition(max(0, self.player.position() - 10000))
         elif key == Qt.Key_Right:
             self.player.setPosition(min(self.player.duration(), self.player.position() + 10000))
         elif key == Qt.Key_Up:
-            self.volume.setValue(min(100, self.volume.value() + 5))
+            self.volume.setValue(min(200, self.volume.value() + 5))
             self.audio.setMuted(False)
         elif key == Qt.Key_Down:
             self.volume.setValue(max(0, self.volume.value() - 5))
 
     def keyPressEvent(self, event) -> None:
-        if isinstance(self.focusWidget(), (QLineEdit, QTextEdit, QSpinBox)):
+        if text_input_has_focus():
+            if event.key() == Qt.Key_Escape:
+                # An editor/IME uses Escape to cancel composition; QDialog's
+                # fallback would reject and destroy the player instead.
+                event.accept()
+                return
             super().keyPressEvent(event)
             return
         if event.key() == Qt.Key_Space:
             self._toggle_playback_shortcut()
+        elif event.key() == Qt.Key_F:
+            self._toggle_fullscreen_shortcut()
         elif event.key() in (Qt.Key_Left, Qt.Key_Right, Qt.Key_Up, Qt.Key_Down):
             self._playback_key(event.key())
         elif event.key() == Qt.Key_Escape and (self.window() if self.embedded else self).isFullScreen():
@@ -544,7 +553,7 @@ class PlayerView(QDialog):
         self.exit_fullscreen()
         if return_from_fullscreen:
             self.window().showMaximized()
-        QApplication.instance().focusChanged.disconnect(self._update_space_shortcuts)
+        QApplication.instance().focusChanged.disconnect(self._update_playback_shortcuts)
         self.details_overlay.close()
         self._pause_timer.stop()
         self.player.stop()

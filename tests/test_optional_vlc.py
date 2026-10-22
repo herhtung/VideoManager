@@ -39,6 +39,9 @@ class OptionalVlcTests(unittest.TestCase):
                 player.switch_backend("mpv")
                 self.assertEqual(player._backend, "qt")
                 self.assertEqual(player.player, player._qt_player)
+                self.assertEqual(player.volume.maximum(), 200)
+                self.assertEqual(player.volume.value(), 100)
+                self.assertEqual(player.volume_label.text(), "100%")
             finally:
                 player.close()
                 connection.close()
@@ -88,6 +91,11 @@ class OptionalVlcTests(unittest.TestCase):
                     self.app.processEvents()
                     toggle.assert_called_once_with()
 
+                with patch.object(player, "toggle_fullscreen") as fullscreen:
+                    QTest.keyClick(player.video, Qt.Key_F)
+                    QTest.keyClick(player.video, Qt.Key_F)
+                    self.assertEqual(fullscreen.call_count, 2)
+
                     editor = QLineEdit(player)
                     editor.show()
                     editor.setFocus()
@@ -95,7 +103,10 @@ class OptionalVlcTests(unittest.TestCase):
                     QTest.keyClicks(editor, "a b")
                     self.app.processEvents()
                     self.assertEqual(editor.text(), "a b")
-                    toggle.assert_called_once_with()
+                    self.assertEqual(fullscreen.call_count, 2)
+                    QTest.keyClicks(editor, " f")
+                    self.assertEqual(editor.text(), "a b f")
+                    self.assertEqual(fullscreen.call_count, 2)
             finally:
                 player.close()
                 connection.close()
